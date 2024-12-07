@@ -1,4 +1,4 @@
-# Feature Representation Methods for OOD and Drift Monitoring
+## Feature Representation Methods for OOD and Drift Monitoring
 
 The first step in out-of-distribution (OOD) detection and dataset drift monitoring is converting images into a suitable feature space. This repository provides three methods for feature representation to facilitate robust OOD and drift monitoring in medical imaging.
 
