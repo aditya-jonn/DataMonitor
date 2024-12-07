@@ -1,8 +1,8 @@
 ## Feature Representation Methods for OOD and Drift Monitoring
 
-The first step in out-of-distribution (OOD) detection and dataset drift monitoring is converting images into a suitable feature space. This repository provides three methods for feature representation to facilitate robust OOD and drift monitoring in medical imaging.
+The first step in out-of-distribution (OOD) detection and dataset drift monitoring is converting images into a suitable feature space. We have implemented three methods for feature representation.
 
-After extracting the features, various methods for measuring differences in the feature space can be applied to detect OOD and drift. [Refer to the GitHub page](#) for details on these methods.
+After extracting the features, various methods for measuring differences in the feature space can be applied to detect OOD and drift. 
 
 ---
 
@@ -13,12 +13,12 @@ This method uses pretrained or task-specific models to extract meaningful featur
 
 #### Scenario 1:
 - A **pretrained CNN** (e.g., VGG16, ResNet) is used as a feature extractor to project high-dimensional image data into a reduced, meaningful feature space.
-- The features are extracted from the reference dataset, allowing for general-purpose dataset monitoring.
+- The features are extracted from the reference dataset, allowing for general-purpose dataset drift monitoring.
 - This scenario does not require a task-specific model and is suitable for detecting data shifts across diverse applications.
 
 #### Scenario 2:
 - Features are extracted using a **task-specific model** trained for a particular objective (e.g., distinguishing pneumonia from normal cases in chest X-rays).
-- This approach leverages the task model’s learned representations, making it better suited for detecting shifts specific to the task at hand.
+- This approach leverages the task model's learned representations, making it better suited for detecting shifts specific to the task at hand.
 
 ---
 
@@ -41,13 +41,23 @@ This method uses pretrained or task-specific models to extract meaningful featur
 
 ## How to Use This Repository
 
-This repository contains three Jupyter notebooks, each implementing one of the feature representation methods:
-1. **Notebook for Feature-Based Detection Using Pretrained Models**: Demonstrates both general-purpose and task-specific feature extraction.
-2. **Notebook for Supervised Contrastive Learning**: Explains and implements a contrastive learning framework for creating a specialized feature space.
-3. **Notebook for Radiomics Feature Extraction**: Walks through the process of extracting radiomics features from medical images.
+This repository contains three Jupyter notebooks, each implementing one of the feature representation methods. Each notebook extracts features from the input dataset and saves them for further analysis:
+
+1. **Notebook for Feature-Based Detection Using Pretrained Models**:
+   - Demonstrates both general-purpose and task-specific feature extraction.
+   - Saves the extracted features in a specified folder.
+
+2. **Notebook for Supervised Contrastive Learning**:
+   - Explains and implements a contrastive learning framework for creating a specialized feature space.
+   - Saves the extracted features in a designated folder.
+
+3. **Notebook for Radiomics Feature Extraction**:
+   - Walks through the process of extracting radiomics features from medical images.
+   - Saves the extracted features in a designated folder.
+
 
 ---
 
 ## Next Steps
 
-Once features are extracted, methods for measuring differences in the feature space can be applied to detect dataset drift and OOD samples. [Refer to the GitHub page](#) for more details.
+Once features are extracted, methods for measuring differences in the feature space can be applied to detect dataset drift.
