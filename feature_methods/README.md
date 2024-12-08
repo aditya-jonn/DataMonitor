@@ -58,6 +58,34 @@ This repository contains three Jupyter notebooks, each implementing one of the f
 
 ---
 
+## Directory Strcture 
+
+feature_extraction/
+│
+├── notebooks/
+│   ├── feature_based_detection.ipynb      # Pretrained models for feature extraction; general and task-specific 
+│   ├── supervised_contrastive_learning.ipynb # Contrastive learning for specialized features
+│   ├── radiomics_feature_extraction.ipynb # Radiomics features extraction
+│
+├── src/
+│   ├── __init__.py                       # Makes the directory a Python module
+│   ├── pretrained_feature_extractor.py   # Handles pretrained and task-specific CNNs
+│   ├── supervised_contrastive.py         # Supervised contrastive learning implementation
+│   ├── radiomics_feature_extractor.py    # Radiomics feature extraction methods
+│   ├── utils/                            # Utility scripts
+│       ├── data_loader.py                # Handles data loading and preprocessing
+│       ├── visualization.py             # Visualization helpers for extracted features
+│
+├── tests/
+│   ├── test_pretrained_extractor.py      # Unit tests for pretrained model extraction
+│   ├── test_supervised_contrastive.py    # Unit tests for contrastive learning features
+│   ├── test_radiomics_extraction.py      # Unit tests for radiomics feature extraction
+│
+├── README.md                             # Instructions and details for the module
+├── requirements.txt                      # Dependencies for running the module
+
+
+---
 ## Next Steps
 These models are implemented to support the preprocessing step of OOD and drift monitoring workflows, where images are converted into feature representations. Once the features are extracted, they can be used for detecting distributional shifts, monitoring drift, or performing downstream tasks.
 
