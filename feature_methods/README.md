@@ -58,5 +58,5 @@ This repository contains three Jupyter notebooks, each implementing one of the f
 
 ---
 ## Next Steps
-These models are implemented to support the preprocessing step of OOD and drift monitoring workflows, where images are converted into feature representations. Once the features are extracted, they can be used for detecting distributional shifts, monitoring drift, or performing downstream tasks.
+These models are implemented to support the preprocessing step of OOD and drift monitoring workflows, where images are converted into feature representations. Once the features are extracted, they can be used for detecting distributional shifts and monitoring drift.
 
