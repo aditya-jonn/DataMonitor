@@ -51,7 +51,7 @@ This repository contains three Jupyter notebooks, each implementing one of the f
    - Explains and implements a contrastive learning framework for creating a specialized feature space.
    - Saves the extracted features in a designated folder.
 
-3. **Notebook for Radiomics Feature Extraction**:
+3. **Notebook for Conventional Feature Extraction**:
    - Walks through the process of extracting radiomics features from medical images.
    - Saves the extracted features in a designated folder.
 
