@@ -1,6 +1,6 @@
 # Distribution Similarity Metrics Module
 
-This Python module is designed to compute various metrics for analyzing the similarity or dissimilarity between two sets of features, typically representing different distributions. Users can choose to compute one or multiple metrics to monitor and analyze the differences between a reference distribution and other data distributions. Below is a detailed explanation of each function and its application, along with the strengths of each type of metric:
+This Python module is designed to compute various metrics for analyzing the similarity or dissimilarity between two sets of features, typically representing different distributions. Users can choose to compute one or multiple metrics to monitor and analyze the differences between a reference distribution and test  distributions. Below is a detailed explanation of each function and its application, along with the strengths of each type of metric:
 
 ## Available Functions
 
