@@ -305,14 +305,26 @@ def compute_kolmogorov_smirnov(tr_features, tt_features):
 
 
 def compute_optimal_transport(P, Q, cost_matrix):
-    """Compute Optimal Transport distance between two probability distributions."""
-    
-    # Normalize P and Q so they sum to the same value
+    """
+    Compute Optimal Transport distance between two probability distributions.
+
+    Args:
+        P (np.ndarray): Source probability distribution (1D array).
+        Q (np.ndarray): Target probability distribution (1D array).
+        cost_matrix (np.ndarray): Transport cost matrix (2D square matrix).
+
+    Returns:
+        float: Optimal Transport distance.
+    """
+    # Normalize P and Q so they sum to 1
     P = np.array(P) / np.sum(P)
     Q = np.array(Q) / np.sum(Q)
-    
-    return float(ot.emd2(P, Q, cost_matrix))
 
+    # Ensure dimensions match
+    assert cost_matrix.shape == (len(P), len(Q)), "Cost matrix dimensions do not match P and Q."
+
+    # Compute Optimal Transport distance
+    return float(ot.emd2(P, Q, cost_matrix))
 
 def compute_share_of_drifted_components(in_features, ood_features, p_threshold=0.05):
     """
