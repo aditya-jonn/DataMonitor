@@ -29,7 +29,7 @@ If you use **DataMonitor** in your work, please cite the following paper:
 Here are the key sections of the **DataMonitor** documentation:
 
 - [Installation Guide](./Documentation/Installation.md)
-- [Modules Overview](./Modules.md)
+- [Modules Overview](./Documentation/Modules.md)
 - [(Input/Output) Examples](./InOut-Examples.md)
 - [Notebook Examples](./Data-Examples.md)
 - [Limitations](./Limitations.md)
