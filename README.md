@@ -28,7 +28,7 @@ If you use **DataMonitor** in your work, please cite the following paper:
 ## **Quick Links**
 Here are the key sections of the **DataMonitor** documentation:
 
-- [Installation Guide](./Installation.md)
+- [Installation Guide](./Documentation/Installation.md)
 - [Modules Overview](./Modules.md)
 - [(Input/Output) Examples](./InOut-Examples.md)
 - [Notebook Examples](./Data-Examples.md)
