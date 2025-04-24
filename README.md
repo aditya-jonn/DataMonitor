@@ -30,7 +30,7 @@ Here are the key sections of the **DataMonitor** documentation:
 
 - [Installation Guide](./Documentation/Installation.md)
 - [Modules Overview](./Documentation/Modules.md)
-- [(Input/Output) Examples](./InOut-Examples.md)
+- [(Input/Output) Examples](./Documentation/InOut-Examples.md)
 - [Notebook Examples](./Data-Examples.md)
 - [Limitations](./Limitations.md)
 - [Contact](./Contact.md)
