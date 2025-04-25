@@ -1,4 +1,4 @@
-# Notebook Examples
+# Data Drift Scenarios
 
 The **DataMonitor** tool provides Jupyter notebooks to demonstrate its functionality in various scenarios. These examples cover different use cases for detecting Out-of-Distribution (OOD) images and monitoring data drift. Each notebook corresponds to a specific scenario and includes step-by-step instructions, input data, and outputs.
 
@@ -8,7 +8,7 @@ The **DataMonitor** tool provides Jupyter notebooks to demonstrate its functiona
 
 1. **Within-Modality OOD (Axial vs. Non-Axial CT Images)**  
    - **Objective**: Differentiate between axial and non-axial CT images within the same modality.  
-   - **Use Case**: Monitor data consistency and identify variations in CT imaging views.
+   - **Use Case**: Monitor data and identify drift in CT imaging views.
 
 2. **Within-Modality OOD (Image Quality)**  
    - **Objective**: Detect lower-quality images compared to high-quality reference images.  
