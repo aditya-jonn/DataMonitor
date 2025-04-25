@@ -36,30 +36,5 @@ Here are the key sections of the **DataMonitor** documentation:
 
 ---
 
-## **Installation Guide**
-Click [here](./Installation.md) to view the installation guide for **DataMonitor**, which provides step-by-step instructions on how to set up and use the tool.
-
----
-
-## **Modules Overview**
-For detailed information about the modules used in **DataMonitor**, visit the [Modules Overview page](./Modules.md).
-
----
-
-## **Data (Input/Output) Examples**
-To see examples of input and output, visit the [Data (Input/Output) Examples page](./InOut-Examples.md).
-
----
-
-## **Notebook Examples**
-To see data examples, visit the [Data Examples page](./Data-Examples.md).
-
----
-
-## **Limitations**
-Learn more about the known limitations of **DataMonitor** by visiting the [Limitations page](./Limitations.md).
-
----
-
 ## **Contact**
 For inquiries or support, check out the [Contact page](./Contact.md).
