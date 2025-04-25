@@ -102,7 +102,8 @@ cd DataMonitor
 
 2. After downloading the source code, you can install it using the following command:
 ```bash
-python setup.py install
+pip install .
+
 ```
 
 
