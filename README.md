@@ -32,8 +32,8 @@ Here are the key sections of the **DataMonitor** documentation:
 - [Modules Overview](./Documentation/Modules.md)
 - [(Input/Output) Examples](./Documentation/InOut-Examples.md)
 - [Notebook Examples](./Documentation/Data-Examples.md)
-- [Limitations](./Limitations.md)
-- [Contact](./Contact.md)
+- [Limitations](./Documentation/Limitations.md)
+- [Contact](./Documentation/Contact.md)
 
 ---
 
