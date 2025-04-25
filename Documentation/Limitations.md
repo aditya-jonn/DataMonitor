@@ -1,6 +1,6 @@
 # Limitations
 
-**DataMonitor** is a powerful tool for detecting deviations from known data distributions. However, its effectiveness has certain limitations that users should be aware of:
+**DataMonitor** is a tool for detecting deviations from known data distributions. However, its effectiveness has certain limitations that users should be aware of:
 
 1. **Simulation-Based Validation**:  
    - DataMonitor was primarily tested and validated on simulated 'stepwise' data drift scenarios over time.  
