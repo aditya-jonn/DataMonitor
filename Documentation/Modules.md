@@ -1,31 +1,29 @@
 # Modules Overview
 
-The **DataMonitor** pipeline consists of three key modules designed to detect Out-of-Distribution (OOD) inputs and monitor data drift over time. Each module serves a specific purpose and incorporates advanced methodologies to address real-world challenges in medical imaging datasets.
+The **DataMonitor** pipeline consists of three key modules designed to detect Out-of-Distribution (OOD) inputs and monitor data drift over time. Each module serves a specific purpose.
 
 ---
 
 ## Module 1: Feature Extraction Module
 
-The **Feature Extraction Module** transforms raw image data into structured feature representations that can be analyzed quantitatively. This module supports both **supervised** and **unsupervised** learning methods, accommodating datasets with or without labels. Additionally, it includes radiomics feature extraction for clinically relevant features.
+The **Feature Extraction Module** transforms raw image data into structured feature representations that can be analyzed quantitatively. This module supports both **supervised** and **unsupervised** learning methods to accommodate datasets with or without labels. 
 
 
 ### **Key Features**
 
 1. **Supervised Learning**:
    - **Pretrained Models**:
-     - **Method1**: Use general-purpose CNNs (e.g., VGG16, ResNet) as feature extractors. These pretrained networks project high-dimensional image data into a reduced, meaningful feature space. Features extracted from reference datasets are used to monitor shifts without the need for a task-specific model.
-     - **Method 2**: Use task-specific models trained for a specific objective (e.g., pneumonia detection in chest X-rays). These models leverage learned representations that align closely with the specific task, enabling better detection of shifts related to the task.
+     - **Method1**: Use general-purpose CNNs (e.g., VGG16, ResNet) as feature extractors. These pretrained networks project high-dimensional image data into a feature space. Features extracted from reference or training datasets are used as a baseline to monitor shifts without the need for a task-specific model.
+     - **Method 2**: Use task-specific models trained for a specific objective (e.g., pneumonia detection in chest X-rays). These models leverage learned representations that align closely with a specific task to enable better detection of shifts related to the task.
 
    - **Contrastive Learning**:
-     - A supervised contrastive learning approach is used to distinguish in-distribution (reference) data from out-of-distribution (test) samples.
+     - A supervised contrastive learning approach is used to distinguish in-distribution (reference) data from out-of-distribution (test/new) samples.
      - The model is trained to:
-       - Maximize similarity among samples from the same distribution.
-       - Minimize similarity with out-of-distribution samples.
-     - This method creates a specialized feature space optimized for robust OOD detection.
+       - structure the feature space such that semantically similar in-distribution (ID) samples are close together.
 
 2. **Unsupervised Learning**:
    - Uses techniques such as:
-     - Autoencoders to learn compressed representations of the data and identify deviations in reconstruction errors.
+     - Autoencoders to learn compressed (latent) representations of input data and detect anomalies by measuring reconstruction errors — high errors may indicate out-of-distribution or anomalous inputs.
      - Dimensionality reduction (e.g., PCA, t-SNE, UMAP) to visualize and identify clusters or anomalies.
 
 
@@ -41,7 +39,7 @@ The **Feature Extraction Module** transforms raw image data into structured feat
 
 ## Module 2: OOD Metric Generation 
 
-The **OOD Metric Generation Module** quantifies deviations between reference (in-distribution) and test (potentially out-of-distribution) data. This module employs **similarity-based metrics** and **distance-based metrics** to measure shifts in data distributions effectively. These metrics can be computed over raw data, feature embeddings, or outputs from a trained model. Examples of the metrics in **DataMonitor** include:
+The **OOD Metric Generation Module** quantifies deviations between reference (in-distribution) and test (potentially out-of-distribution) data. This module employs **similarity-based metrics** and **distance-based metrics** to measure shifts in data distributions. These metrics can be computed over feature embeddings, or outputs from a trained model. Examples of the metrics in **DataMonitor** include:
 
 
 #### 1. **Cosine Similarity**
@@ -94,7 +92,7 @@ The **OOD Metric Generation Module** quantifies deviations between reference (in
 
 ### **Post-hoc and Model-Agnostic Analysis**
 
-The **OOD Metric Generation Module** provides flexibility by enabling post-hoc, model-agnostic analysis. This means the metrics can be applied independently of the specific model or task. These 
+The **OOD Metric Generation Module** provides flexibility by enabling post-hoc, model-agnostic analysis. This means the metrics can be applied independently of the model to measure drift in the data. These 
 
 - These metrics can quantify deviations between reference and test distributions without requiring task-specific models.
 - They can help pinpoint out-of-distribution images in datasets or inputs during deployment.
@@ -105,7 +103,10 @@ The **OOD Metric Generation Module** provides flexibility by enabling post-hoc, 
 
 ## Module 3: Statistical Process Control for Drift Monitoring 
 
-The **SPC Module** monitors dataset stability over time and flags deviations using **Statistical Process Control (SPC)** techniques. It ensures that potential data drift or anomalies are promptly identified.
+The **SPC Module** monitors dataset stability over time and flags deviations using **Statistical Process Control (SPC)** techniques. It ensures that potential data drift or anomalies are promptly identified. Using SPC for detecting drift was introduced in: 
+
+   **Prathapan, Smriti, et al.** "Quantifying input data drift in medical machine learning models by detecting change-points in time-series data." *Medical Imaging 2024: Computer-Aided Diagnosis*, vol. 12927. SPIE, 2024.
+
 
 ### **Key Methods and Thresholding**
 
@@ -113,12 +114,13 @@ The **SPC Module** monitors dataset stability over time and flags deviations usi
 - **Description**: Detects outliers by identifying data points that fall beyond a specified number of standard deviations (\( k \)) from the mean.
 - **Threshold**:
   - Common defaults:
-    - \( \pm 2\sigma \): Approximately 95% of data within bounds.
+    - \( \pm 2\sigma \): Approximately 95.4% of data within bounds.
     - \( \pm 3\sigma \): Approximately 99.7% of data within bounds.
   - **Optimization**:
     - Thresholds can be optimized based on:
-      - **False Positive Rate (FPR)**: A higher \( k \)-value reduces false positives but may miss subtle drifts.
-      - **Application Sensitivity**: For critical applications (e.g., clinical safety), stricter thresholds (\( \pm 3\sigma \)) are preferred.
+      - **False Positive Rate (FPR)**
+      - **Application Sensitivity**
+      - **Average Delay Time**
   - **User Input**:
     - Users can specify the \( k \)-value to tailor sensitivity.
     - Defaults to \( \pm 3\sigma \) in absence of user input.
@@ -147,36 +149,14 @@ The **SPC Module** monitors dataset stability over time and flags deviations usi
     - Default settings are designed for moderate sensitivity.
 
 
-#### **3. Bernoulli CUSUM**
-- **Description**: Monitors binary outcomes (e.g., OOD detected or not) in real-time and flags when the observed rate significantly deviates from the expected baseline.
-- **Formula**:
-  ![Bernoulli CUSUM Formula](https://latex.codecogs.com/svg.latex?C_t%20=%20%5Cmax%280,%20C_%7Bt-1%7D%20+%20%5Clog%5Cleft%28%5Cfrac%7Bp_1%7D%7Bp_0%7D%5Cright%29%20-%20%5Clog%5Cleft%28%5Cfrac%7B1-p_1%7D%7B1-p_0%7D%5Cright%29%29)
-  where:
-  - \( p_0 \): Baseline probability,
-  - \( p_1 \): Drift probability,
-  - \( C_t \): Cumulative score at time \( t \).
-- **Threshold**:
-  - Trigger is raised when \( C_t \) exceeds a pre-specified limit \( h \).
-  - Default values:
-    - \( p_0 = 0.01 \): Assumes 1% baseline OOD rate.
-    - \( p_1 = 0.05 \): Detects when OOD rate rises to 5%.
-    - \( h = 4 \): Moderate sensitivity to changes.
-  - **Optimization**:
-    - Fine-tune \( p_0 \), \( p_1 \), and \( h \) using simulations to reflect real-world data.
-    - Adjust \( p_1 \) higher for systems tolerant to OODs and lower for sensitive applications.
-  - **User Input**:
-    - Users can input \( p_0 \), \( p_1 \), and \( h \) based on application needs.
-    - Defaults ensure robust detection in general settings.
-
 
 ### **Threshold Selection Guidelines**
-1. **Default Settings**: Pre-configured thresholds (\( \pm 3\sigma \), \( K = 0.5\sigma \), \( h = 4 \)) ensure balanced sensitivity and robustness for most applications.
+1. **Default Settings**: Pre-configured thresholds (\( \pm 3\sigma \), \( K = 0.5\sigma \), \( h = 4 \)).
 2. **User-Defined Inputs**:
    - Users with domain expertise can customize thresholds to meet specific operational or regulatory needs.
 3. **Optimization**:
    - Utilize historical data or simulations to adjust thresholds.
    - Trade-offs:
-     - **Sensitivity vs. Specificity**: Stricter thresholds detect subtle drifts but increase false positives.
      - **Detection Delay vs. False Alarms**: Tighter thresholds reduce detection delays but may increase noise.
 
 ---
