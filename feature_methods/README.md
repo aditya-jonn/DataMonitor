@@ -1,8 +1,8 @@
 ## Feature Representation Methods for OOD and Drift Monitoring
 
-The first step in out-of-distribution (OOD) detection and dataset drift monitoring is converting images into a suitable feature space. We have implemented three methods for feature representation.
+The first step in out-of-distribution (OOD) detection and dataset drift monitoring is converting images into a feature space. We have implemented three methods for feature representation.
 
-After extracting the features, various methods for measuring differences in the feature space can be applied to detect OOD and drift. 
+After extracting the features, various metrics for measuring differences in the feature space can be applied to detect OOD and drift. 
 
 ---
 
@@ -24,10 +24,6 @@ This method uses pretrained or task-specific models to extract meaningful featur
 
 ### 2. Supervised Contrastive Learning
 - A contrastive learning approach is used to train a model to distinguish **in-distribution** (reference) from **out-of-distribution** (test) samples.
-- The model is trained to:
-  - **Maximize similarity** between samples from the same distribution.
-  - **Minimize similarity** with samples from different distributions.
-- This method creates a highly specialized feature space for robust OOD detection.
 
 ---
 
