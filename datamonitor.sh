@@ -227,52 +227,13 @@ if [[ "$RUN_SETUP" == "1" ]]; then
     # Pinning < 60 makes it use Python 3.8's stdlib distutils, which does not warn.
     pip install "setuptools<60" --quiet
 
-    # Dependencies are pinned HERE (embedded), not read from the repo's
-    # requirements.txt — that keeps the upstream requirements.txt pristine.
-    # Tight `==` pins on packages whose version affects numerical results;
-    # loose pins for support libraries. The --extra-index-url pulls the CUDA
-    # 11.3 torch build (A100 = sm_80); on CPU-only or pre-Ampere GPUs, drop
-    # that line and the two `+cu113` suffixes.
-    say "Installing requirements (embedded pinned spec) ..."
-    REQ_FILE="$VENV_DIR/datamonitor-requirements.txt"
-    cat > "$REQ_FILE" <<'REQ'
-# Core numerical stack (tight pins -- affect results)
-numpy==1.19.5
-scipy==1.5.4
-scikit-learn==0.24.2
-scikit-image==0.17.2
-pandas==1.1.5
-
-# Deep learning (tight pins -- paper used these exact versions).
-# CUDA 11.3 build for the A100 (sm_80); default PyPI wheels are CUDA 10.2.
---extra-index-url https://download.pytorch.org/whl/cu113
-torch==1.10.1+cu113
-torchvision==0.11.2+cu113
-
-# Domain library (tight pin -- dataset behavior)
-medmnist==2.2.3
-
-# Imaging / plotting (loose)
-Pillow>=8.4.0,<10.0.0
-matplotlib>=3.3.4,<3.8.0
-imageio>=2.9.0,<2.20.0
-tifffile>=2020.9.3
-PyWavelets>=1.1.1
-networkx>=2.5.1
-
-# Utility (loose)
-tqdm>=4.64.1
-joblib>=1.1.1
-seaborn>=0.11.2
-fire>=0.5.0
-termcolor>=1.1.0
-six>=1.16.0
-python-dateutil>=2.8.2
-pytz>=2023.3
-typing-extensions>=4.1.1
-packaging>=21.3
-REQ
-    pip install -r "$REQ_FILE" --quiet
+    # Dependencies are installed from the committed lockfile requirements.lock.txt
+    # (exact resolved versions; the --extra-index-url for the +cu113 torch/torchvision
+    # wheels is recorded inside that file). Tracked source now, not generated here.
+    LOCK_FILE="$REPO_DIR/requirements.lock.txt"
+    [[ -f "$LOCK_FILE" ]] || die "missing $LOCK_FILE (the frozen environment is committed source now — check out the full repo)."
+    say "Installing requirements from committed lockfile ($LOCK_FILE) ..."
+    pip install -r "$LOCK_FILE" --quiet
 
     say "Python: $(python --version)   Pip: $(pip --version | cut -d' ' -f1-2)"
 
