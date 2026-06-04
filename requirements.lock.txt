@@ -1,0 +1,40 @@
+# ── DataMonitor frozen environment — ARCHIVAL (Python 3.8, CUDA 11.3 / A100 sm_80) ──
+# Exact resolved stack that reproduces the paper's Table 3 / Figure 3.
+# Reconstruct precisely:
+#   python3.8 -m venv venv-py38 && source venv-py38/bin/activate
+#   pip install 'setuptools<60'        # install-time fix (LooseVersion under -W error)
+#   pip install -r requirements.lock.txt
+# The --extra-index-url below supplies the +cu113 torch/torchvision wheels.
+# On CPU-only / pre-Ampere GPUs: drop that line and the two '+cu113' suffixes.
+--extra-index-url https://download.pytorch.org/whl/cu113
+
+contourpy==1.1.1
+cycler==0.12.1
+fire==0.7.1
+fonttools==4.57.0
+imageio==2.19.5
+joblib==1.4.2
+kiwisolver==1.4.7
+matplotlib==3.6.3
+medmnist==2.2.3
+networkx==3.1
+numpy==1.19.5
+packaging==26.2
+pandas==1.1.5
+Pillow==9.5.0
+pyparsing==3.1.4
+python-dateutil==2.9.0.post0
+pytz==2026.2
+PyWavelets==1.4.1
+scikit-image==0.17.2
+scikit-learn==0.24.2
+scipy==1.5.4
+seaborn==0.12.2
+six==1.17.0
+termcolor==2.4.0
+threadpoolctl==3.5.0
+tifffile==2023.7.10
+torch==1.10.1+cu113
+torchvision==0.11.2+cu113
+tqdm==4.67.3
+typing_extensions==4.13.2
