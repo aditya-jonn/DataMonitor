@@ -11,3 +11,4 @@ cfg.json
 *.log
 .coverage*
 htmlcov/
+coverage_report.txt
