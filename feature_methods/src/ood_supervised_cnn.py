@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision.models import resnet18
+from torchvision.models import resnet18, ResNet18_Weights
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
@@ -26,7 +26,7 @@ class _ResNet18Binary(nn.Module):
 
     def __init__(self, pretrained=False):
         super().__init__()
-        net = resnet18(pretrained=pretrained)
+        net = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
         net.fc = nn.Sequential(nn.Linear(512, 2), nn.Sigmoid())
         self.net = net
 

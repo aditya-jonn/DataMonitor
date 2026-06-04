@@ -67,7 +67,7 @@ def main():
     print(f"Saved dataset as matrices at: {data_splits_path} !")
 
     # Autoencoder
-    autoencoder_load = torch.load(opt.autoencoder_path)
+    autoencoder_load = torch.load(opt.autoencoder_path, weights_only=False)
     autoencoder_model = load_model(autoencoder_load["options"], mode="testing")
     autoencoder_eval = load_eval(autoencoder_model, train_set, val_set, test_set)
     autoencoder_fts_path = os.path.join(cfg["data_dir"], "../numpy_files/autoencoder_features")
@@ -79,7 +79,7 @@ def main():
     print(f"Saved autoencoder features at: {autoencoder_fts_path} !")
 
     # Supervised CNN
-    cnn_load = torch.load(opt.cnn_path)
+    cnn_load = torch.load(opt.cnn_path, weights_only=False)
     cnn_model = load_model(cnn_load["options"], mode="testing")
     cnn_eval = load_eval(cnn_model, train_set, val_set, test_set)
     cnn_fts_path = os.path.join(cfg["data_dir"], "../numpy_files/cnn_features")
@@ -91,7 +91,7 @@ def main():
     print(f"Saved ood-supervised CNN features at: {cnn_fts_path} !")
 
     # Supervised Contrastive CNN
-    ctr_load = torch.load(opt.ctr_path)
+    ctr_load = torch.load(opt.ctr_path, weights_only=False)
     ctr_model = load_model(ctr_load["options"], mode="testing")
     ctr_eval = load_eval(ctr_model, train_set, val_set, test_set)
     ctr_fts_path = os.path.join(cfg["data_dir"], "../numpy_files/ctr_features")

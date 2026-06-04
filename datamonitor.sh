@@ -191,14 +191,14 @@ if [[ "$RUN_SETUP" == "1" ]]; then
 
     # Sanity-check the requested Python interpreter exists.
     command -v "$PYTHON_BIN" >/dev/null 2>&1 || \
-        die "$PYTHON_BIN not found on PATH. Install Python 3.8 or set PYTHON_BIN."
+        die "$PYTHON_BIN not found on PATH. Install Python 3.11 or set PYTHON_BIN."
 
-    # Confirm it's 3.8.x. Newer versions break the upstream requirements.txt.
+    # Confirm it's 3.11.x (the version requirements.lock.txt resolves against).
     pyver="$("$PYTHON_BIN" -c 'import sys;print("%d.%d" % sys.version_info[:2])')"
-    if [[ "$pyver" != "3.8" ]]; then
-        warn "PYTHON_BIN is Python $pyver, not 3.8 — upstream requirements.txt"
-        warn "pins numpy 1.19 / torch 1.10 which have no wheels for Python $pyver."
-        warn "Install may fail. Set PYTHON_BIN=python3.8 to be safe."
+    if [[ "$pyver" != "3.11" ]]; then
+        warn "PYTHON_BIN is Python $pyver, not 3.11 — requirements.lock.txt pins"
+        warn "torch 2.6 / numpy 2.x resolved for 3.11; install may fail."
+        warn "Set PYTHON_BIN=python3 (3.11) to be safe."
     fi
 
     # Create venv if missing. Prefer python -m venv; fall back to virtualenv.pyz
@@ -220,12 +220,8 @@ if [[ "$RUN_SETUP" == "1" ]]; then
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
 
-    say "Upgrading pip and wheel; pinning setuptools < 60 ..."
-    pip install --upgrade pip wheel --quiet
-    # setuptools >= 60 vendors its own distutils, whose LooseVersion raises a
-    # DeprecationWarning that ood_detection.py turns fatal via filterwarnings("error").
-    # Pinning < 60 makes it use Python 3.8's stdlib distutils, which does not warn.
-    pip install "setuptools<60" --quiet
+    say "Upgrading pip, setuptools, and wheel ..."
+    pip install --upgrade pip setuptools wheel --quiet
 
     # Dependencies are installed from the committed lockfile requirements.lock.txt
     # (exact resolved versions; the --extra-index-url for the +cu113 torch/torchvision

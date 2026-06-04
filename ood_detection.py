@@ -4,7 +4,7 @@ import json
 import os
 import random
 import warnings
-warnings.filterwarnings("error")
+warnings.filterwarnings("error", category=RuntimeWarning)
 
 import numpy as np
 import matplotlib.pyplot as plt

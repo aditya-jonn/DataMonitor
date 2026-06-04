@@ -42,7 +42,7 @@ class Model(ABC):
 
     def load(self, model_path: str):
         print("==> Loading!")
-        d = torch.load(model_path)
+        d = torch.load(model_path, weights_only=False)
         # set options
         self.options = d["options"]
         # load model & device
