@@ -298,81 +298,13 @@ REQ
 }
 EOF
 
-    # --- patch datasets/__init__.py: augmented two-crop views (supervised-ctr) ---
-    # Upstream wraps the PLAIN transform in TwoCropTransform, so the two contrastive
-    # views are identical and SupCon is inert; the author augments each view
-    # (RandomResizedCrop + RandomRotation). Idempotent; preserves the rest of the file.
-    say "Patching datasets/__init__.py (contrastive augmentation) ..."
-    python - "$REPO_DIR/datasets/__init__.py" <<'DSPATCH'
-import sys
-dp = sys.argv[1]
-t = open(dp, encoding="utf-8").read()
-if "RandomResizedCrop" in t:
-    print("  datasets/__init__.py: augmentation already present - skipping")
-else:
-    if "from torchvision import transforms" not in t:
-        t = t.replace(
-            "from .medmnist_abdominalCT import AbnominalCTDataset",
-            "from torchvision import transforms\nfrom .medmnist_abdominalCT import AbnominalCTDataset",
-            1,
-        )
-    OLD = ('        if options["method"] == "supervised-ctr":\n'
-           '            train_tfms = TwoCropTransform(train_tfms)\n'
-           '            val_tfms = TwoCropTransform(val_tfms)')
-    NEW = ('        if options["method"] == "supervised-ctr":\n'
-           '            _ctr_aug = transforms.Compose([\n'
-           '                transforms.RandomResizedCrop(size=28),\n'
-           '                transforms.RandomRotation(10),\n'
-           '                transforms.ToTensor(),\n'
-           '                transforms.Normalize(mean=[.5], std=[.5]),\n'
-           '            ])\n'
-           '            train_tfms = TwoCropTransform(_ctr_aug)\n'
-           '            val_tfms = TwoCropTransform(_ctr_aug)')
-    if OLD not in t:
-        raise SystemExit("ERROR: expected TwoCropTransform block not found in datasets/__init__.py")
-    t = t.replace(OLD, NEW, 1)
-    open(dp, "w", encoding="utf-8").write(t)
-    print("  datasets/__init__.py: applied contrastive augmentation")
-DSPATCH
-
-    # --- patch train.py: deterministic seeding (reproducible training) ---
-    # Upstream train.py sets no seeds and leaves cuDNN nondeterministic, so weights,
-    # shuffle order, and augmentation differ run-to-run. Seed Python/NumPy/torch and
-    # force cuDNN determinism at the top of main(). Honors $DM_SEED (default 1001).
-    # Idempotent; preserves the rest of the file.
-    say "Patching train.py (deterministic seeding) ..."
-    python - "$REPO_DIR/train.py" <<'TRSEED'
-import sys
-tp = sys.argv[1]
-s = open(tp, encoding="utf-8").read()
-if "_seed_everything" in s:
-    print("  train.py: seeding already present - skipping")
-else:
-    FUNC = (
-        "def _seed_everything(seed=None):\n"
-        "    import os, random\n"
-        "    import numpy as np\n"
-        "    import torch\n"
-        "    if seed is None:\n"
-        "        seed = int(os.environ.get('DM_SEED', '1001'))\n"
-        "    os.environ['PYTHONHASHSEED'] = str(seed)\n"
-        "    random.seed(seed)\n"
-        "    np.random.seed(seed)\n"
-        "    torch.manual_seed(seed)\n"
-        "    if torch.cuda.is_available():\n"
-        "        torch.cuda.manual_seed_all(seed)\n"
-        "    torch.backends.cudnn.deterministic = True\n"
-        "    torch.backends.cudnn.benchmark = False\n"
-        "    print('[seed] deterministic mode, seed=' + str(seed))\n"
-        "\n\n"
-    )
-    anchor = "def main():\n"
-    if anchor not in s:
-        raise SystemExit("ERROR: 'def main()' not found in train.py")
-    s = s.replace(anchor, FUNC + "def main():\n    _seed_everything()\n", 1)
-    open(tp, "w", encoding="utf-8").write(s)
-    print("  train.py: inserted deterministic seeding")
-TRSEED
+    # ── datasets/__init__.py and train.py carry their edits as committed source ─
+    # Previously patched here at runtime: augmented two-crop views for supervised-ctr
+    # (RandomResizedCrop + RandomRotation) and deterministic seeding in train.py.
+    # These are tracked source now, so verify the edits are present (don't apply them).
+    grep -q "RandomResizedCrop" "$REPO_DIR/datasets/__init__.py" || die "datasets/__init__.py lacks the contrastive-augmentation edit; expected committed source (re-checkout the repo)."
+    grep -q "_seed_everything" "$REPO_DIR/train.py" || die "train.py lacks the deterministic-seeding edit; expected committed source (re-checkout the repo)."
+    say "datasets/__init__.py and train.py carry their committed edits."
 
     say "Setup complete."
 else

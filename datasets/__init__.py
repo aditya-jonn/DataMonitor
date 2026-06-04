@@ -4,6 +4,7 @@ Package `__init__`: dataset loading function
 import numpy as np
 from tqdm import tqdm
 
+from torchvision import transforms
 from .medmnist_abdominalCT import AbnominalCTDataset
 from feature_methods.supcon_loss import TwoCropTransform
 
@@ -14,8 +15,14 @@ def load_data(options: dict):
         val_tfms = AbnominalCTDataset.get_default_transform()
         test_tfms = AbnominalCTDataset.get_default_transform()
         if options["method"] == "supervised-ctr":
-            train_tfms = TwoCropTransform(train_tfms)
-            val_tfms = TwoCropTransform(val_tfms)
+            _ctr_aug = transforms.Compose([
+                transforms.RandomResizedCrop(size=28),
+                transforms.RandomRotation(10),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[.5], std=[.5]),
+            ])
+            train_tfms = TwoCropTransform(_ctr_aug)
+            val_tfms = TwoCropTransform(_ctr_aug)
         # train/val/test datasets
         train_set = AbnominalCTDataset(
             data_dir=options["data_dir"],
