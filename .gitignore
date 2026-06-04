@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+venv-py38/
+data/
+model_saves/
+numpy_files/
+figures/
+results/
+cfg.json
+*.bak.*
+*.log
