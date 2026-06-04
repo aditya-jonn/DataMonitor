@@ -9,3 +9,5 @@ results/
 cfg.json
 *.bak.*
 *.log
+.coverage*
+htmlcov/

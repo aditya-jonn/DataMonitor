@@ -1,4 +1,0 @@
-This code includes the implementation of one-class classification, which is taken from:
-Ruff, Lukas, et al. "Deep one-class classification." International conference on machine learning. PMLR, 2018
-
-https://github.com/lukasruff/Deep-SVDD-PyTorch
