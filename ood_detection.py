@@ -13,11 +13,15 @@ from scipy.spatial import distance
 from sklearn.metrics import confusion_matrix
 from scipy.linalg import pinv
 from tqdm import tqdm
+from sklearn.covariance import LedoitWolf
 
 from utils import set_seed
 
 with open("cfg.json", "r") as f:
     cfg = json.load(f)
+
+VERBOSE_EVERY_CALL = False
+_MAHA_CACHE = {}
 
 # fancy metric name
 metrics = {
@@ -133,7 +137,7 @@ def compute_cosine_similarity(tr_features_, tt_features_):
     return similarities
 
 # Compute mahalanobis distance
-def compute_mahalanobis_distance(tr_features_, tt_features_):
+def OLD_compute_mahalanobis_distance(tr_features_, tt_features_):
     centroid = np.mean(tr_features_, axis=0)
     cov_matrix = np.cov(tr_features_, rowvar=False)
     inv_cov_matrix = pinv(cov_matrix)
@@ -143,6 +147,94 @@ def compute_mahalanobis_distance(tr_features_, tt_features_):
         diff = feature - centroid
         dist = np.sqrt(np.dot(np.dot(diff, inv_cov_matrix), diff.T))
         distances.append(dist)
+    return distances
+
+def _fingerprint(tr):
+    """Cheap content check so a stale cache entry is never silently reused."""
+    step = max(1, tr.shape[0] // 7)
+    return (tr.shape, str(tr.dtype), float(np.asarray(tr[::step]).sum()))
+
+def _fit_and_diagnose(tr):
+    """Fit Ledoit-Wolf on the training features; build the diagnostic report."""
+    tr = np.asarray(tr, dtype=np.float64)      # float32 features + kappa ~ 1e14 don't mix
+    n, d = tr.shape
+    eps = np.finfo(np.float64).eps
+    tiny = 1e-300                              # display-only guard against /0
+
+    # --- the matrix the previous code inverted: pinv(np.cov(tr)) ----------
+    S_raw = np.cov(tr, rowvar=False)
+    lam = np.linalg.eigvalsh(S_raw)            # ascending
+    lam_abs = np.abs(lam)                      # numerical noise can dip below 0
+    lam_max = lam[-1]
+    lam_min = lam[0]
+    mean_lam = lam.mean()                      # = trace(S)/d
+    cond_raw = lam_max / max(lam_min, tiny)
+    n_below_1e8 = int((lam < 1e-8).sum())
+    lam_clip = np.clip(lam, 0.0, None)
+    eff_rank = float(lam_clip.sum() ** 2 / max((lam_clip ** 2).sum(), tiny))
+
+    # what scipy.linalg.pinv would do with this matrix (default tolerance)
+    pinv_cutoff = d * eps * lam_max            # singular values below this are dropped
+    retained = lam_abs > pinv_cutoff
+    n_truncated = int(d - retained.sum())
+    smallest_retained = float(lam_abs[retained].min()) if retained.any() else float("nan")
+    amp_pinv = 1.0 / max(smallest_retained, tiny)
+
+    # --- the replacement: Ledoit-Wolf shrinkage ----------------------------
+    lw = LedoitWolf().fit(tr)
+    alpha = float(lw.shrinkage_)
+    lam_lw = np.linalg.eigvalsh(lw.covariance_)
+    cond_lw = lam_lw[-1] / max(lam_lw[0], tiny)
+    floor_theory = alpha * mean_lam            # min eigenvalue of (1-a)S + a*mean_eig*I
+    amp_lw = 1.0 / max(lam_lw[0], tiny)
+    # distortion of the dominant direction, compared on the same (1/n) scale
+    lam_max_ml = lam_max * (n - 1) / n
+    top_shift = abs(lam_lw[-1] - lam_max_ml) / max(lam_max_ml, tiny)
+
+    report = "\n".join([
+        "=" * 74,
+        "[mahalanobis] training-feature covariance diagnostics",
+        f"  features                          : n={n} samples, d={d} dims  (n/d={n/d:.1f})",
+        "  --- raw sample covariance: the matrix pinv() previously inverted ---",
+        f"  eigenvalues (min / mean / max)    : {lam_min:.2e} / {mean_lam:.2e} / {lam_max:.2e}",
+        f"  condition number                  : {cond_raw:.2e}",
+        f"  eigenvalues < 1e-8                : {n_below_1e8} of {d}",
+        f"  effective rank (participation)    : {eff_rank:.1f} of {d}",
+        f"  scipy pinv default cutoff         : {pinv_cutoff:.2e}  (d*eps*lam_max)",
+        f"  eigs truncated by pinv            : {n_truncated};  smallest RETAINED eig: {smallest_retained:.2e}",
+        f"  => pinv max amplification (1/lam) : {amp_pinv:.2e}",
+        "     a tiny test-point component along that direction is squared and",
+        "     multiplied by this factor before entering the distance",
+        "  --- Ledoit-Wolf shrunk covariance: (1-a)*S + a*mean_eig*I ---",
+        f"  shrinkage a                       : {alpha:.3e}",
+        f"  eigenvalue floor (a * mean_eig)   : {floor_theory:.2e}",
+        f"  eigenvalues (min / max)           : {lam_lw[0]:.2e} / {lam_lw[-1]:.2e}",
+        f"  condition number                  : {cond_lw:.2e}   (reduced {cond_raw / max(cond_lw, tiny):.1e} x)",
+        f"  => LW max amplification (1/lam)   : {amp_lw:.2e}   (reduced {amp_pinv / max(amp_lw, tiny):.1e} x)",
+        f"  top-eigenvalue distortion         : {100.0 * top_shift:.3f} %   (dominant directions ~unchanged)",
+        "=" * 74,
+    ])
+    return lw.location_, lw.get_precision(), report
+
+# Compute mahalanobis distance (Ledoit-Wolf precision; diagnostics on first use)
+def compute_mahalanobis_distance(tr_features_, tt_features_):
+    key = id(tr_features_)
+    fp = _fingerprint(tr_features_)
+    entry = _MAHA_CACHE.get(key)
+    if entry is None or entry["fp"] != fp:
+        centroid, precision, report = _fit_and_diagnose(tr_features_)
+        entry = {"fp": fp, "centroid": centroid, "precision": precision, "report": report}
+        _MAHA_CACHE[key] = entry
+        print(report)
+    elif VERBOSE_EVERY_CALL:
+        print(entry["report"])
+
+    centroid = entry["centroid"]
+    inv_cov_matrix = entry["precision"]
+    distances = []
+    for feature in tt_features_:
+        diff = feature - centroid
+        distances.append(np.sqrt(max(diff @ inv_cov_matrix @ diff.T, 0.0)))
     return distances
 
 """Compute control limits"""
