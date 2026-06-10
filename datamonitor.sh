@@ -112,6 +112,14 @@ BOOTSTRAP_N="${BOOTSTRAP_N:-100}"
 USE_GPUS="${USE_GPUS:-}"
 FORCE_TRAIN="${FORCE_TRAIN:-0}"
 
+# Random seed (set in .env). Fallback required: set -u aborts on unset vars.
+DM_SEED="${DM_SEED:-1001}"
+export DM_SEED
+
+# Per-run checkpoint sub-folder that train.py writes to (utils.make_run_dir):
+#   $MODEL_SAVES_DIR/bsz<BATCH_SIZE>_seed<SEED>/
+RUN_SUBDIR="bsz${BATCH_SIZE}_seed${DM_SEED}"
+
 # Optional explicit checkpoint paths (otherwise auto-discovered)
 AUTOENCODER_CKPT="${AUTOENCODER_CKPT:-}"
 CNN_CKPT="${CNN_CKPT:-}"
@@ -137,14 +145,16 @@ check_dir() {
     [[ -d "$1" ]] || die "required directory missing: $1"
 }
 
-# Find the newest .pt file in MODEL_SAVES_DIR whose basename starts with any of
-# the given prefixes (tried in order). Echoes the path, or empty string if none.
+# Find the newest checkpoint for THIS run. Search only the per-run sub-folder
+# train.py writes to ($MODEL_SAVES_DIR/$RUN_SUBDIR), so a model from a different
+# batch-size/seed experiment is never picked up by accident.
 find_newest_ckpt() {
     [[ -d "$MODEL_SAVES_DIR" ]] || { echo ""; return; }
+    local run_dir="$MODEL_SAVES_DIR/$RUN_SUBDIR"
     local prefix hit
+    # run-specific folder, newest by mtime, prefixes in priority order
     for prefix in "$@"; do
-        # -t sorts by mtime; head -1 grabs the newest.
-        hit="$(ls -t "$MODEL_SAVES_DIR"/${prefix}_*.pt 2>/dev/null | head -1 || true)"
+        hit="$(ls -t "$run_dir"/${prefix}_*.pt 2>/dev/null | head -1 || true)"
         if [[ -n "$hit" ]]; then echo "$hit"; return; fi
     done
     echo ""
@@ -326,6 +336,7 @@ train_one() {
         --method "$method"
         --learning_rate "$LEARNING_RATE"
         --batch_size "$BATCH_SIZE"
+        --seed "$DM_SEED"
         --max_epochs "$EPOCHS"
         --positive_dataset "$POSITIVE_DATASET"
     )
@@ -405,6 +416,8 @@ if [[ "$RUN_EXTRACT" == "1" ]]; then
     extract_args=(
         --dataset "MedMNIST-AbdominalCT"
         --positive_dataset "$POSITIVE_DATASET"
+        --batch_size "$BATCH_SIZE"
+        --seed "$DM_SEED"
         --autoencoder_path "$AUTOENCODER_CKPT"
         --cnn_path "$CNN_CKPT"
         --ctr_path "$CTR_CKPT"
@@ -412,7 +425,7 @@ if [[ "$RUN_EXTRACT" == "1" ]]; then
     [[ -n "$USE_GPUS" ]] && extract_args+=( --use_gpus "$USE_GPUS" )
     ( cd "$REPO_DIR" && python get_features.py "${extract_args[@]}" )
  
-    say "Extract complete. Feature .npz files in $NUMPY_FILES_DIR."
+    say "Extract complete. Feature .npz files in $NUMPY_FILES_DIR/$RUN_SUBDIR."
 else
     say "[extract] Skipped (RUN_EXTRACT=0)."
 fi
@@ -438,6 +451,8 @@ if [[ "$RUN_EVAL" == "1" ]]; then
             ( cd "$REPO_DIR" && python ood_detection.py \
                 --metric "$metric" \
                 --method "$method" \
+                --batch_size "$BATCH_SIZE" \
+                --seed "$DM_SEED" \
                 --bootstrap "$BOOTSTRAP_N" )
         done
     done
@@ -467,7 +482,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
  
 repo = "$REPO_DIR"
-numpy_dir = "$NUMPY_FILES_DIR"
+numpy_dir = "$NUMPY_FILES_DIR/$RUN_SUBDIR"
 figs = "$FIGURES_DIR"
 sys.path.insert(0, repo)
 import random

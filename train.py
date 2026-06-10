@@ -6,11 +6,13 @@ import os
 import json
 import time
 
+import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from datasets import load_data
 from feature_methods import load_model
+from utils import make_run_dir
 
 with open("cfg.json", "r") as f:
     cfg = json.load(f)
@@ -20,7 +22,8 @@ def parse_options():
 
     # general arguments
     parser.add_argument("--use-gpus", default='all', type=str, help='gpu device numbers')
-
+    parser.add_argument("--seed", type=int, default=int(os.environ.get("DM_SEED", "1001")),
+                        help="random seed for reproducible training")
     # method arguments
     parser.add_argument('--method', type=str, \
                         choices=["conv-autoencoder", "supervised-cnn", "supervised-ctr"])
@@ -44,7 +47,7 @@ def parse_options():
     parser.add_argument('--max_epochs', type=int, default=100)
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--print_mode', type=bool, default=True)
-    
+
     # extract
     opt = parser.parse_args()
 
@@ -63,9 +66,10 @@ def parse_options():
 
     # storage files
     opt.model_path = './model_saves'
+    run_dir = make_run_dir(opt.model_path, opt.batch_size, opt.seed)
     opt.model_name = '{}_{}_{}_defaulttfms_lr{}_bsz{}_nep{}_indist{}_time{}'.\
         format(opt.method, opt.base_model, opt.dataset, opt.learning_rate, opt.batch_size, opt.max_epochs, id_view, time.time())
-    opt.save_path = os.path.join(opt.model_path, opt.model_name + ".pt")
+    opt.save_path = os.path.join(run_dir, opt.model_name + ".pt")
 
     # make options dictionary
     options = {
@@ -85,6 +89,7 @@ def parse_options():
         "print_mode": opt.print_mode,
         "save_path": opt.save_path,
         "model_name": opt.model_name,
+        "seed": opt.seed,
     }
 
     return options
@@ -107,13 +112,14 @@ def _seed_everything(seed=None):
 
 
 def main():
-    _seed_everything()
     options = parse_options()
+    _seed_everything(options["seed"])
 
     train_set, val_set, test_set = load_data(options)
 
-    train_loader = DataLoader(train_set, batch_size=options["batch_size"], shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=options["batch_size"], shuffle=True)
+    g = torch.Generator().manual_seed(options["seed"])
+    train_loader = DataLoader(train_set, batch_size=options["batch_size"], shuffle=True, generator=g)
+    val_loader = DataLoader(val_set, batch_size=options["batch_size"], shuffle=True, generator=g)
 
     feature_model = load_model(options)
     feature_model.train_model(train_loader, val_loader)

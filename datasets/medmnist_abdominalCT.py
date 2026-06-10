@@ -11,13 +11,11 @@ import torchvision
 from torchvision import transforms
 from torch.utils.data import Dataset
 
-from utils import set_seed
-
 class AbnominalCTDataset(Dataset):
     def __init__(self, data_dir, split, label_mode, positive_dataset="organamnist", \
                  tfms=None, random_seed=1001):
-        # set random seeds
-        set_seed(random_seed)
+        # local RNG for the index shuffle; do NOT touch global RNG state
+        rng = random.Random(random_seed)
 
         # set dataset transform
         self.tfms = tfms
@@ -39,7 +37,7 @@ class AbnominalCTDataset(Dataset):
 
         self.l1, self.l2, self.l3 = [len(x) for x in self.data_list]
         self.length = self.l1 + self.l2 + self.l3
-        self.random_order = random.sample(list(range(self.length)), k=self.length)
+        self.random_order = rng.sample(range(self.length), k=self.length)
 
         if label_mode not in ["unsupervised", "cheap-supervised", "full-supervised"]:
             raise ValueError("label mode not supported: {}".format(label_mode))
@@ -49,7 +47,7 @@ class AbnominalCTDataset(Dataset):
                 raise ValueError("dataset not supported: {}".format(positive_dataset))
             self.positive = self.data_order[positive_dataset]
             self.positive_dataset = positive_dataset
-    
+
     def __getitem__(self, index):
         ri, ai = self.reduce_index(self.random_order[index])
         image, class_label = self.data_list[ai][ri]

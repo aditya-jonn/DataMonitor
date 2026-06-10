@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import random
+import re
 import warnings
 warnings.filterwarnings("error", category=RuntimeWarning)
 
@@ -15,7 +16,7 @@ from scipy.linalg import pinv
 from tqdm import tqdm
 from sklearn.covariance import LedoitWolf
 
-from utils import set_seed
+from utils import set_seed, make_run_dir, run_name
 
 with open("cfg.json", "r") as f:
     cfg = json.load(f)
@@ -35,9 +36,10 @@ def apply_spc_rules(data, mean, std, metric_name):
     violations = {"Rule 1": []}
 
     for i in range(len(data)):
-        # Rule 1: Any single data point more than 3σ in absolute distance from the center line.
-        # For cosine similarity: only check the lower bound
-        # For Mahalanobis distance: only check the upper bound 
+        # Rule 1 (one-sided for OOD): a point beyond the 3σ limit on the side
+        # that indicates dissimilarity from the in-distribution centroid.
+        # Cosine similarity: flag the LOWER tail (low similarity = OOD).
+        # Mahalanobis distance: flag the UPPER tail (large distance = OOD).
         if metric_name == "cosine":
             if data[i] < (mean - 3 * std):
                 violations["Rule 1"].append(i)
@@ -122,6 +124,7 @@ def ood_visualization(distances, mean, UCL, LCL, rule, ood_labels=None, metric_n
     # plt.legend(by_label.values(), by_label.keys(), loc='upper right')
 
     plt.savefig(figure_path)
+    plt.close()
 
 # Compute cosine similarity
 def compute_cosine_similarity(tr_features_, tt_features_):
@@ -322,6 +325,8 @@ def parse_options():
     parser.add_argument("--metric", type=str, choices=["cosine", "mahalanobis"], help="OOD metric")
     parser.add_argument("--method", type=str, choices=["autoencoder", "cnn", "ctr"], help="method to get features per image")
     parser.add_argument("--bootstrap", type=int, default=100, help="number of bootstrapped samples")
+    parser.add_argument("--batch_size", type=int, default=128, help="batch size of the run being evaluated (for output naming)")
+    parser.add_argument("--seed", type=int, default=int(os.environ.get("DM_SEED", "1001")), help="seed of the run being evaluated (for output naming)")
 
     # extract
     opt = parser.parse_args()
@@ -332,6 +337,8 @@ def parse_options():
         "method": opt.method,
         "positive_dataset": "organamnist", # hard coded
         "bootstrap": opt.bootstrap,
+        "batch_size": opt.batch_size,
+        "seed": opt.seed,
         "data_dir": cfg["data_dir"]
     }
 
@@ -340,9 +347,11 @@ def parse_options():
 """Main"""
 def main():
     options = parse_options()
+    set_seed(options["seed"])
 
-    # Load data from npz
-    data_splits_path = "./numpy_files/data_splits.npz"
+    # Load data from npz (per-run folder, matching get_features.py)
+    numpy_dir = os.path.join("./numpy_files", run_name(options["batch_size"], options["seed"]))
+    data_splits_path = os.path.join(numpy_dir, "data_splits.npz")
     D = np.load(data_splits_path)
     Xtr = D["Xtr"]
     ytr = D["ytr"]
@@ -354,35 +363,72 @@ def main():
 
     # Get features
     if options["method"] == "autoencoder":
-        F = np.load('./numpy_files/autoencoder_features.npz')
+        F = np.load(os.path.join(numpy_dir, 'autoencoder_features.npz'))
         Ftr = F["autoencoder_Ftr"]
         Ftt = F["autoencoder_Ftt"]
+        ckpt_pth = str(F["autoencoder_pth"])
     elif options["method"] == "cnn":
-        F = np.load('./numpy_files/cnn_features.npz')
+        F = np.load(os.path.join(numpy_dir, 'cnn_features.npz'))
         Ftr = F["cnn_Ftr"]
         Ftt = F["cnn_Ftt"]
+        ckpt_pth = str(F["cnn_pth"])
     elif options["method"] == "ctr":
-        F = np.load('./numpy_files/ctr_features.npz')
+        F = np.load(os.path.join(numpy_dir, 'ctr_features.npz'))
         Ftr = F["ctr_Ftr"]
         Ftt = F["ctr_Ftt"]
+        ckpt_pth = str(F["ctr_pth"])
     else:
         raise NotImplementedError(f"Requested feature method is not implemented: {options['method']}")
-    
+
+    # Provenance guard: features must come from this run's checkpoint.
+    # Hard-fail if the checkpoint path carries a DIFFERENT run key (true mislabeling);
+    # warn only if it carries none (legacy/flat checkpoints, e.g. paper-pretrained).
+    expected = run_name(options["batch_size"], options["seed"])
+    if expected not in ckpt_pth:
+        msg = (f"features in {numpy_dir} were extracted from checkpoint '{ckpt_pth}', "
+               f"which does not carry this run's key ({expected}).")
+        if re.search(r"bsz\d+_seed\d+", ckpt_pth):
+            raise RuntimeError(f"Feature provenance mismatch: {msg} Re-run get_features.py for this run.")
+        warnings.warn(f"Feature provenance unverified (legacy checkpoint path): {msg}")
+
     # Get features for all in-distribution (ID) training images
     Ftr_in = Ftr[ytr == 1]
     # Compute OOD statistics using entire test set
     n = options["bootstrap"]
     accuracy, specificity, sensitivity = ood_statistics(Ftr_in, Ftt, 1 - ytt, options["metric"], n=n)
+
+    # per-run output sub-folders: results/<run>, figures/<run>
+    results_dir = make_run_dir("./results", options["batch_size"], options["seed"], metric=options["metric"])
+    figures_dir = make_run_dir("./figures", options["batch_size"], options["seed"], metric=options["metric"])
+
     np.savez(
-        file=f"./numpy_files/{options['metric']}_{options['method']}_bootstrap.npz",
+        file=os.path.join(results_dir, f"{options['metric']}_{options['method']}_bootstrap.npz"),
         accuracy=accuracy,
         specificity=specificity,
         sensitivity=sensitivity,
     )
 
+    # Control chart visualization over the full test set
+    _, test_distances, train_mean, train_std, train_UCL, train_LCL = \
+        compute_control_limits(Ftr_in, Ftt, options["metric"])
+    figure_path = os.path.join(figures_dir, f"{options['metric']}_{options['method']}_viz.png")
+    ood_visualization(
+        test_distances,
+        train_mean,
+        train_UCL,
+        train_LCL,
+        rule="Rule 1",
+        ood_labels=1 - ytt,
+        metric_name=options["metric"],
+        figure_path=figure_path,
+    )
+    print(f"Saved control-chart figure to: {figure_path}")
+
     # Add to results table
     table_entry = {
+        "Batch Size": options["batch_size"],
         "Metric": options["metric"],
+        "Seed": options["seed"],
         "Method": options["method"],
         # Accuracy
         "Mean Accuracy": np.nanmean(accuracy),
@@ -397,14 +443,24 @@ def main():
         "LCL Sensitivity": np.nanmean(sensitivity) - np.nanstd(sensitivity),
         "UCL Sensitivity": np.nanmean(sensitivity) + np.nanstd(sensitivity),
     }
+    table_entry_df = pd.DataFrame([table_entry])
+    # per-run results: accumulate one row per method (replace this method's row on re-run)
+    per_run_path = os.path.join(results_dir, "results.csv")
+    if os.path.exists(per_run_path):
+        existing = pd.read_csv(per_run_path)
+        existing = existing[existing["Method"] != options["method"]]   # drop stale row for this method
+        run_df = pd.concat([existing, table_entry_df], ignore_index=True)
+    else:
+        run_df = table_entry_df
+    run_df = run_df.sort_values("Method").reset_index(drop=True)
+    run_df.to_csv(per_run_path, header=True, index=False)
+    # aggregate master table (all runs)
     if os.path.exists(cfg['table_path']):
         df = pd.read_csv(cfg['table_path'])
-        table_entry_df = pd.DataFrame([table_entry])
         df = pd.concat([df, table_entry_df], ignore_index=True)
     else:
         df = pd.DataFrame([table_entry])
     df.to_csv(cfg['table_path'], header=True, index=False)
 
 if __name__ == "__main__":
-    set_seed(2001)
     main()
