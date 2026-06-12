@@ -12,3 +12,6 @@ cfg.json
 .coverage*
 htmlcov/
 coverage_report.txt
+logs/
+venv-py311/
+.setup.lock

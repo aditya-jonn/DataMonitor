@@ -55,7 +55,7 @@ def matrixify(dset, label_mode="cheap-supervised"):
         raise NotImplementedError("label mode not implemented: {}".format(label_mode))
     X = np.empty((len(dset), 28*28))
     y = np.empty((len(dset)))
-    for i in tqdm(range(len(dset))):
+    for i in tqdm(range(len(dset)), disable=None):
         image, label = dset[i]
         X[i,:] = image.flatten()
         y[i] = int(label)

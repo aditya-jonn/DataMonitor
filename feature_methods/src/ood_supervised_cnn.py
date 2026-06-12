@@ -70,7 +70,7 @@ class OODSupervisedCNN(Model):
     def _train_epoch(self, loader):
         self.model.train()
         losses = []
-        for images, labels in tqdm(loader):
+        for images, labels in tqdm(loader, disable=None):
             images = self._to3(images).to(self.device)
             targets = F.one_hot(labels.long().view(-1), num_classes=2).float().to(self.device)
             self.optimizer.zero_grad()
@@ -85,7 +85,7 @@ class OODSupervisedCNN(Model):
         self.model.eval()
         losses, ys, yhats = [], [], []
         with torch.no_grad():
-            for images, labels in tqdm(loader):
+            for images, labels in tqdm(loader, disable=None):
                 images = self._to3(images).to(self.device)
                 tgt = F.one_hot(labels.long().view(-1), num_classes=2).float().to(self.device)
                 out = self.model(images)
@@ -109,7 +109,7 @@ class OODSupervisedCNN(Model):
             self.best_epoch_number = self.current_epoch_number
             self.save_model(epoch_val_loss=val_loss)
         if self.options.get("print_mode", True):
-            print(f"Epoch {self.current_epoch_number}  train={train_loss:.4f}  "
+            print(f"[{self._key()}] Epoch {self.current_epoch_number}  train={train_loss:.4f}  "
                   f"val={val_loss:.4f}  auroc={val_auroc:.4f}  best_auroc={self.best_auroc:.4f}")
 
 

@@ -187,7 +187,7 @@ class OODSupervisedCTR(Model):
 
     def _run_split(self, loader, train: bool):
         running, n = 0.0, 0
-        for images, labels in tqdm(loader):
+        for images, labels in tqdm(loader, disable=None):
             # TwoCropTransform yields [view1, view2]; stack both views along batch.
             if isinstance(images, (list, tuple)):
                 images = torch.cat([images[0], images[1]], dim=0)
@@ -226,7 +226,7 @@ class OODSupervisedCTR(Model):
             self.best_epoch_number = self.current_epoch_number
             self.save_model(epoch_val_loss=epoch_val)
         if self.options.get("print_mode", True):
-            print(f"Epoch {self.current_epoch_number}  train={epoch_train:.4f}  "
+            print(f"[{self._key()}] Epoch {self.current_epoch_number}  train={epoch_train:.4f}  "
                   f"val={epoch_val:.4f}  best={self.best_loss:.4f}")
 
 

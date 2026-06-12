@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.spatial import distance
 from sklearn.metrics import confusion_matrix
-from scipy.linalg import pinv
+from scipy.linalg import pinv, cholesky, solve_triangular
 from tqdm import tqdm
 from sklearn.covariance import LedoitWolf
 
@@ -27,7 +27,9 @@ _MAHA_CACHE = {}
 # fancy metric name
 metrics = {
     "cosine": "Cosine Similarity",
-    "mahalanobis": "Mahalanobis Distance"
+    "mahalanobis": "Mahalanobis Distance",
+    "mahalanobis-solve": "Mahalanobis Distance (direct solve)",
+    "mahalanobis-pinv": "Mahalanobis Distance (raw pinv baseline)"
 }
 
 """Apply SPC rules (per image)"""
@@ -43,7 +45,7 @@ def apply_spc_rules(data, mean, std, metric_name):
         if metric_name == "cosine":
             if data[i] < (mean - 3 * std):
                 violations["Rule 1"].append(i)
-        elif metric_name == "mahalanobis":
+        elif metric_name.startswith("mahalanobis"):
             if data[i] > (mean + 3 * std):
                 violations["Rule 1"].append(i)
         else:
@@ -240,6 +242,132 @@ def compute_mahalanobis_distance(tr_features_, tt_features_):
         distances.append(np.sqrt(max(diff @ inv_cov_matrix @ diff.T, 0.0)))
     return distances
 
+# ---------------------------------------------------------------------------
+# Mahalanobis distance via DIRECT EQUATION SOLVING (no explicit inverse).
+# Factors the Ledoit-Wolf covariance (PD by construction) once: Sigma = L L^T,
+# then solves L y = (x - mu); d^2 = ||y||^2 is a sum of squares (>= 0 by
+# construction, no clamp, no explicit inverse). Solving cannot rescue the raw
+# covariance (singular => least-squares solve IS pinv); the one-time report
+# probes the raw matrix to print that verdict for the actual data.
+# ---------------------------------------------------------------------------
+_MAHA_SOLVE_CACHE = {}
+
+def _fingerprint(tr):
+    step = max(1, tr.shape[0] // 7)
+    return (tr.shape, str(tr.dtype), float(np.asarray(tr[::step]).sum()))
+
+def _fit_solver(tr):
+    """Fit Ledoit-Wolf, Cholesky-factor it, and probe the raw covariance."""
+    tr64 = np.asarray(tr, dtype=np.float64)
+    n, d = tr64.shape
+
+    # Hypothesis probe: would direct solving work on the RAW covariance?
+    try:
+        cholesky(np.cov(tr64, rowvar=False), lower=True)
+        raw_verdict = ("raw covariance happens to be numerically PD here; a direct "
+                       "solve on it would run, but its accuracy is still limited by "
+                       "the raw conditioning (see the 'mahalanobis' report)")
+    except np.linalg.LinAlgError:
+        raw_verdict = ("raw covariance is NOT numerically positive definite -> "
+                       "Cholesky fails; direct solving alone cannot replace shrinkage")
+
+    lw = LedoitWolf().fit(tr64)
+    L = cholesky(lw.covariance_, lower=True)
+
+    report = "\n".join([
+        "=" * 74,
+        "[mahalanobis-solve] direct-solve diagnostics",
+        f"  features            : n={n} samples, d={d} dims",
+        f"  raw-covariance probe: {raw_verdict}",
+        f"  factored matrix     : Ledoit-Wolf covariance (PD by construction), "
+        f"shrinkage a={float(lw.shrinkage_):.3e}",
+        "  method              : Sigma = L L^T; solve L y = (x - mu); d^2 = ||y||^2",
+        "                        (sum of squares => d^2 >= 0 by construction; no pinv,",
+        "                        no explicit inverse, no clamping)",
+        "  equivalence         : same Sigma as metric 'mahalanobis' -> distances must",
+        "                        agree to ~1e-9 relative; larger deviation = bug",
+        "=" * 74,
+    ])
+    return {"centroid": lw.location_, "L": L, "report": report}
+
+def compute_mahalanobis_distance_solve(tr_features_, tt_features_):
+    key = id(tr_features_)
+    fp = _fingerprint(tr_features_)
+    entry = _MAHA_SOLVE_CACHE.get(key)
+    if entry is None or entry["fp"] != fp:
+        entry = _fit_solver(tr_features_)
+        entry["fp"] = fp
+        _MAHA_SOLVE_CACHE[key] = entry
+        print(entry["report"])
+    elif VERBOSE_EVERY_CALL:
+        print(entry["report"])
+
+    diff = np.asarray(tt_features_, dtype=np.float64) - entry["centroid"]  # (n_test, d)
+    y = solve_triangular(entry["L"], diff.T, lower=True)                   # L y = diff^T
+    return np.sqrt(np.einsum("ij,ij->j", y, y))
+
+# ---------------------------------------------------------------------------
+# Mahalanobis distance via the ORIGINAL estimator: raw covariance + pinv.
+# Kept as a comparison BASELINE for the LW-based metrics. Faithful to
+# OLD_compute_mahalanobis_distance except three controlled deviations:
+#   1. the fit is cached (pinv is deterministic -> identical numbers, far
+#      less work inside the bootstrap loop);
+#   2. features are promoted to float64, matching the LW paths so that the
+#      comparison isolates the ESTIMATOR rather than arithmetic precision;
+#   3. the quadratic form is clamped at 0 before sqrt: pinv round-off can go
+#      slightly negative, and this module promotes RuntimeWarning to a hard
+#      error, so without the clamp one bad sample kills the whole eval.
+#      Clamp events are evidence of the instability and are reported once.
+# ---------------------------------------------------------------------------
+_MAHA_PINV_CACHE = {}
+
+def _fit_pinv(tr):
+    """Raw sample covariance + scipy pinv; see the raw-covariance section of
+    the '[mahalanobis]' diagnostic report for this matrix's conditioning."""
+    tr64 = np.asarray(tr, dtype=np.float64)
+    n, d = tr64.shape
+    centroid = tr64.mean(axis=0)
+    precision = pinv(np.cov(tr64, rowvar=False))
+    report = "\n".join([
+        "=" * 74,
+        "[mahalanobis-pinv] baseline (raw covariance + pseudo-inverse)",
+        f"  features  : n={n} samples, d={d} dims",
+        "  estimator : np.cov + scipy.linalg.pinv -- the pre-shrinkage original;",
+        "              conditioning/amplification diagnostics are in the raw-",
+        "              covariance section of the '[mahalanobis]' report",
+        "  deviations: cached fit; float64 features; quadratic form clamped at 0",
+        "              before sqrt (clamp events reported once when first seen)",
+        "=" * 74,
+    ])
+    return {"centroid": centroid, "precision": precision, "report": report}
+
+# Compute mahalanobis distance with the original pinv estimator (cached fit)
+def compute_mahalanobis_distance_pinv(tr_features_, tt_features_):
+    key = id(tr_features_)
+    fp = _fingerprint(tr_features_)
+    entry = _MAHA_PINV_CACHE.get(key)
+    if entry is None or entry["fp"] != fp:
+        entry = _fit_pinv(tr_features_)
+        entry["fp"] = fp
+        entry["neg_clamped"] = 0
+        entry["neg_reported"] = False
+        _MAHA_PINV_CACHE[key] = entry
+        print(entry["report"])
+    elif VERBOSE_EVERY_CALL:
+        print(entry["report"])
+
+    diff = np.asarray(tt_features_, dtype=np.float64) - entry["centroid"]  # (n_test, d)
+    q = np.einsum("ij,jk,ik->i", diff, entry["precision"], diff)
+    n_neg = int((q < 0).sum())
+    if n_neg:
+        entry["neg_clamped"] += n_neg
+        if not entry["neg_reported"]:
+            entry["neg_reported"] = True
+            print(f"[mahalanobis-pinv] clamped {n_neg} negative quadratic form(s) to 0 "
+                  "(pinv round-off; the LW metrics do not produce these); "
+                  "further occurrences are counted silently")
+    return np.sqrt(np.clip(q, 0.0, None))
+
 """Compute control limits"""
 def compute_control_limits(tr_features, tt_features, metric):
     # Control similarities
@@ -249,6 +377,12 @@ def compute_control_limits(tr_features, tt_features, metric):
     elif metric == "mahalanobis":
         train_distances = compute_mahalanobis_distance(tr_features, tr_features)
         test_distances = compute_mahalanobis_distance(tr_features, tt_features)
+    elif metric == "mahalanobis-solve":
+        train_distances = compute_mahalanobis_distance_solve(tr_features, tr_features)
+        test_distances = compute_mahalanobis_distance_solve(tr_features, tt_features)
+    elif metric == "mahalanobis-pinv":
+        train_distances = compute_mahalanobis_distance_pinv(tr_features, tr_features)
+        test_distances = compute_mahalanobis_distance_pinv(tr_features, tt_features)
     else:
         raise NotImplementedError(f"Metric is not implemented: {metric}")
     # Control limit calculations
@@ -267,6 +401,10 @@ def ood_statistics(tr_features, tt_features, ood_labels, metric, n=100, rule="Ru
         fxn = compute_cosine_similarity
     elif metric == "mahalanobis":
         fxn = compute_mahalanobis_distance
+    elif metric == "mahalanobis-solve":
+        fxn = compute_mahalanobis_distance_solve
+    elif metric == "mahalanobis-pinv":
+        fxn = compute_mahalanobis_distance_pinv
     else:
         raise NotImplementedError(f"Metric is not implemented: {metric}")
     train_distances = fxn(tr_features, tr_features)
@@ -279,7 +417,7 @@ def ood_statistics(tr_features, tt_features, ood_labels, metric, n=100, rule="Ru
     specificity = []
     # Bootstrap loop
     random.seed(2022)   # author's bootstrap RNG (Python random, not numpy)
-    for i in tqdm(range(n)):
+    for i in tqdm(range(n), disable=None):
         # Pick a subset of the testing images
         sample = random.sample(list(range(tt_features.shape[0])), k=100)   # author: no replacement, k=100
         tt_subset = tt_features[sample, :]
@@ -322,7 +460,7 @@ def ood_statistics(tr_features, tt_features, ood_labels, metric, n=100, rule="Ru
 def parse_options():
     parser = argparse.ArgumentParser('argument for training')
 
-    parser.add_argument("--metric", type=str, choices=["cosine", "mahalanobis"], help="OOD metric")
+    parser.add_argument("--metric", type=str, choices=["cosine", "mahalanobis", "mahalanobis-solve", "mahalanobis-pinv"], help="OOD metric")
     parser.add_argument("--method", type=str, choices=["autoencoder", "cnn", "ctr"], help="method to get features per image")
     parser.add_argument("--bootstrap", type=int, default=100, help="number of bootstrapped samples")
     parser.add_argument("--batch_size", type=int, default=128, help="batch size of the run being evaluated (for output naming)")
@@ -454,13 +592,6 @@ def main():
         run_df = table_entry_df
     run_df = run_df.sort_values("Method").reset_index(drop=True)
     run_df.to_csv(per_run_path, header=True, index=False)
-    # aggregate master table (all runs)
-    if os.path.exists(cfg['table_path']):
-        df = pd.read_csv(cfg['table_path'])
-        df = pd.concat([df, table_entry_df], ignore_index=True)
-    else:
-        df = pd.DataFrame([table_entry])
-    df.to_csv(cfg['table_path'], header=True, index=False)
 
 if __name__ == "__main__":
     main()

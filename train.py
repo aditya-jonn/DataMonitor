@@ -111,6 +111,13 @@ def _seed_everything(seed=None):
     print('[seed] deterministic mode, seed=' + str(seed))
 
 
+def _seed_worker(worker_id):
+    import numpy as np, random, torch
+    s = (torch.initial_seed() + worker_id) % 2**32
+    np.random.seed(s)
+    random.seed(s)
+
+
 def main():
     options = parse_options()
     _seed_everything(options["seed"])
@@ -118,8 +125,11 @@ def main():
     train_set, val_set, test_set = load_data(options)
 
     g = torch.Generator().manual_seed(options["seed"])
-    train_loader = DataLoader(train_set, batch_size=options["batch_size"], shuffle=True, generator=g)
-    val_loader = DataLoader(val_set, batch_size=options["batch_size"], shuffle=True, generator=g)
+    nw = int(os.environ.get("DM_NUM_WORKERS", "0"))   # 0 = old behavior if unset
+    loader_kwargs = dict(num_workers=nw, persistent_workers=(nw > 0),
+                         pin_memory=torch.cuda.is_available(), worker_init_fn=_seed_worker)
+    train_loader = DataLoader(train_set, batch_size=options["batch_size"], shuffle=True, generator=g, **loader_kwargs)
+    val_loader = DataLoader(val_set, batch_size=options["batch_size"], shuffle=True, generator=g, **loader_kwargs)
 
     feature_model = load_model(options)
     feature_model.train_model(train_loader, val_loader)

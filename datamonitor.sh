@@ -120,6 +120,9 @@ export DM_SEED
 #   $MODEL_SAVES_DIR/bsz<BATCH_SIZE>_seed<SEED>/
 RUN_SUBDIR="bsz${BATCH_SIZE}_seed${DM_SEED}"
 
+# Metrics evaluated in stage 4a (space-separated; trim or extend in .env).
+EVAL_METRICS="${EVAL_METRICS:-cosine mahalanobis mahalanobis-solve mahalanobis-pinv}"
+
 # Optional explicit checkpoint paths (otherwise auto-discovered)
 AUTOENCODER_CKPT="${AUTOENCODER_CKPT:-}"
 CNN_CKPT="${CNN_CKPT:-}"
@@ -199,6 +202,12 @@ CURRENT_STAGE="1/4 setup"
 if [[ "$RUN_SETUP" == "1" ]]; then
     banner "Stage 1/4: Environment Setup"
 
+    # Serialize setup across concurrent pipelines: the first process does the
+    # work, the rest block here then fast-skip through the idempotent body.
+    # The lock auto-releases if the holder crashes.
+    exec 9>"$REPO_DIR/.setup.lock"
+    flock -x 9
+
     # Sanity-check the requested Python interpreter exists.
     command -v "$PYTHON_BIN" >/dev/null 2>&1 || \
         die "$PYTHON_BIN not found on PATH. Install Python 3.11 or set PYTHON_BIN."
@@ -240,6 +249,7 @@ if [[ "$RUN_SETUP" == "1" ]]; then
     [[ -f "$LOCK_FILE" ]] || die "missing $LOCK_FILE (the frozen environment is committed source now — check out the full repo)."
     say "Installing requirements from committed lockfile ($LOCK_FILE) ..."
     pip install -r "$LOCK_FILE" --quiet
+    pip install --quiet rich   # terminal results table (merge_results.py)
 
     say "Python: $(python --version)   Pip: $(pip --version | cut -d' ' -f1-2)"
 
@@ -258,12 +268,14 @@ if [[ "$RUN_SETUP" == "1" ]]; then
     # The upstream train.py, get_features.py, ood_detection.py all read cfg.json
     # for these two keys. We rewrite it from scratch so the user's paths win.
     say "Writing $REPO_DIR/cfg.json ..."
-    cat > "$REPO_DIR/cfg.json" <<EOF
+    _cfg_tmp="$REPO_DIR/cfg.json.tmp.$$"   # PID-unique: no shared tmp name to collide on
+    cat > "$_cfg_tmp" <<EOF
 {
     "data_dir": "$DATA_DIR",
     "table_path": "$RESULTS_DIR/ood_bootstrap.csv"
 }
 EOF
+    mv -f "$_cfg_tmp" "$REPO_DIR/cfg.json"   # atomic rename: readers never see a partial file
 
     # ── datasets/__init__.py and train.py carry their edits as committed source ─
     # Previously patched here at runtime: augmented two-crop views for supervised-ctr
@@ -273,6 +285,7 @@ EOF
     grep -q "_seed_everything" "$REPO_DIR/train.py" || die "train.py lacks the deterministic-seeding edit; expected committed source (re-checkout the repo)."
     say "datasets/__init__.py and train.py carry their committed edits."
 
+    exec 9>&-   # close the lock fd -> release the setup lock
     say "Setup complete."
 else
     say "[setup] Skipped (RUN_SETUP=0)."
@@ -403,7 +416,10 @@ if [[ "$RUN_EXTRACT" == "1" ]]; then
     # we already created $NUMPY_FILES_DIR, we make a symlink so its writes land
     # in the right place. (Pure path-rewriting is cleaner than monkey-patching.)
     sibling_numpy="$(dirname "$DATA_DIR")/numpy_files"
-    if [[ "$sibling_numpy" != "$NUMPY_FILES_DIR" ]]; then
+    # compare canonical paths: a relative DATA_DIR and an absolute
+    # NUMPY_FILES_DIR can be the same directory yet differ as strings,
+    # which used to trigger a false 'features may land in the wrong place'
+    if [[ "$(realpath -m "$sibling_numpy")" != "$(realpath -m "$NUMPY_FILES_DIR")" ]]; then
         if [[ -e "$sibling_numpy" && ! -L "$sibling_numpy" ]]; then
             warn "$sibling_numpy exists and isn't a symlink — features may land in the wrong place."
         else
@@ -442,11 +458,13 @@ if [[ "$RUN_EVAL" == "1" ]]; then
  
     # ── 4a: Bootstrap OOD detection — reproduces paper Table 3 ──────────────
     say "Running bootstrap OOD detection (Table 3) ..."
-    # Reset the results CSV so this run produces a fresh Table 3.
-    [[ -f "$RESULTS_DIR/ood_bootstrap.csv" ]] && rm -f "$RESULTS_DIR/ood_bootstrap.csv"
  
     for method in autoencoder cnn ctr; do
-        for metric in cosine mahalanobis; do
+        # NB: script-wide IFS excludes spaces (strict mode, ~line 67), so bare
+        # $EVAL_METRICS would NOT split on spaces. Split explicitly; the IFS
+        # override is scoped to the read command and leaves global IFS alone.
+        IFS=' ' read -r -a _eval_metrics <<< "$EVAL_METRICS"
+        for metric in "${_eval_metrics[@]}"; do
             say "  $method × $metric"
             ( cd "$REPO_DIR" && python ood_detection.py \
                 --metric "$metric" \
@@ -458,13 +476,11 @@ if [[ "$RUN_EVAL" == "1" ]]; then
     done
  
     say ""
-    say "Table 3 written to: $RESULTS_DIR/ood_bootstrap.csv"
-    say "Quick preview:"
-    if command -v column >/dev/null 2>&1; then
-        column -t -s , "$RESULTS_DIR/ood_bootstrap.csv" | head -20
-    else
-        head -20 "$RESULTS_DIR/ood_bootstrap.csv"
-    fi
+
+    # merge_results.py rebuilds the master CSV and renders the results table.
+    # The master is a derived view: a merge hiccup must warn, never fail eval.
+    ( cd "$REPO_DIR" && python merge_results.py ) || \
+        say "WARNING: results merge failed; per-run results are intact. Rebuild anytime: python merge_results.py"
  
     # ── 4b: Drift simulation — reproduces paper Figure 3 ────────────────────
     # The upstream repo never wires SPC_Charts/data_shift_simulation.py and
@@ -483,7 +499,8 @@ import matplotlib.pyplot as plt
  
 repo = "$REPO_DIR"
 numpy_dir = "$NUMPY_FILES_DIR/$RUN_SUBDIR"
-figs = "$FIGURES_DIR"
+figs = "$FIGURES_DIR/$RUN_SUBDIR"
+os.makedirs(figs, exist_ok=True)
 sys.path.insert(0, repo)
 import random
 np.random.seed(${DM_SEED:-1001})
@@ -537,7 +554,7 @@ PY
     say ""
     say "Eval complete."
     say "  Table 3 CSV: $RESULTS_DIR/ood_bootstrap.csv"
-    say "  Figure 3:    $FIGURES_DIR/drift_ctr_cosine_figure3.png"
+    say "  Figure 3:    $FIGURES_DIR/$RUN_SUBDIR/drift_ctr_cosine_figure3.png"
 else
     say "[eval] Skipped (RUN_EVAL=0)."
 fi

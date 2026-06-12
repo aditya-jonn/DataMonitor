@@ -138,7 +138,7 @@ class ConvAutoEncoder(Model):
         self.model.train()
         total_train_loss = []  # List to store training loss for each batch
 
-        for i, (images, labels) in enumerate(tqdm(train_loader)):
+        for i, (images, labels) in enumerate(tqdm(train_loader, disable=None)):
             # Clear optimizer gradients
             self.optimizer.zero_grad()
 
@@ -158,7 +158,7 @@ class ConvAutoEncoder(Model):
 
             # Record training loss
             total_train_loss.append(batch_loss.item())
-        
+
         # Calculate average training loss for the epoch
         epoch_train_loss = sum(total_train_loss) / len(total_train_loss)
 
@@ -166,7 +166,7 @@ class ConvAutoEncoder(Model):
         self.model.eval()
         total_val_loss = []  # List to store validation loss for each batch
 
-        for i, (images, labels) in enumerate(tqdm(val_loader)):
+        for i, (images, labels) in enumerate(tqdm(val_loader, disable=None)):
             with torch.no_grad():
                 # Convert grayscale images to 3-channel
                 images = torch.cat([images, images, images], dim=1)
@@ -198,7 +198,7 @@ class ConvAutoEncoder(Model):
         # Print training and validation loss
         if self.options["print_mode"]:
             print(
-                f"Epoch #{self.current_epoch_number} | Train Loss: {epoch_train_loss:.4f} | " +
+                f"[{self._key()}] Epoch #{self.current_epoch_number} | Train Loss: {epoch_train_loss:.4f} | " +
                 f"Val Loss: {epoch_val_loss:.4f} | Best Loss: {self.best_loss:.4f}"
             )
 
@@ -223,7 +223,7 @@ class ConvAutoEncoderFeatureSpace(FeatureSpace):
         features = []  # List to store extracted features
         ldr = DataLoader(dset, batch_size=32, shuffle=False)  # DataLoader for the dataset
 
-        for j, (images, labels) in enumerate(tqdm(ldr)):
+        for j, (images, labels) in enumerate(tqdm(ldr, disable=None)):
             with torch.no_grad():  # Disable gradient computation
                 # Convert grayscale images to 3-channel
                 images = torch.cat([images, images, images], dim=1)
