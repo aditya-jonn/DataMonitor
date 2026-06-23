@@ -47,7 +47,7 @@ setup ──▶ train ──▶ extract ──▶ eval
 | **extract** | Runs each checkpoint over the data splits and caches the feature matrices. | `bsz<B>_seed<S>` | `get_features.py` |
 | **eval** | Scores those features with every metric, bootstraps detection statistics into the master table, and runs the drift simulation. | `bsz<B>_<metric>_seed<S>` | `ood_detection.py`, `merge_results.py` |
 
-Each stage is wrapped in `if [[ "$RUN_<STAGE>" == "1" ]]`. The common iteration workflow, `RUN_SETUP=0 RUN_TRAIN=0 RUN_EXTRACT=0 ./datamonitor.sh`, re-runs only evaluation against existing features.
+Each stage is wrapped in `if [[ "$RUN_<STAGE>" == "1" ]]`. See [Common workflows](#common-workflows) for the usual toggle combinations.
 
 ---
 
@@ -72,7 +72,7 @@ Each stage is wrapped in `if [[ "$RUN_<STAGE>" == "1" ]]`. The common iteration 
 
 What each arrow carries:
 
-- **Setup → everything.** `cfg.json` carries two keys (`data_dir`, `table_path`) that every Python entrypoint reads.
+- **Setup → everything.** `cfg.json`'s `data_dir` and `table_path` are read by every Python entrypoint.
 - **Train → Extract.** Checkpoints (`.pt`) under `model_saves/bsz<B>_seed<S>/`. The extract stage auto-discovers the newest matching checkpoint per method, or uses an explicit `*_CKPT` path.
 - **Extract → Eval.** Feature matrices and materialised data splits under `numpy_files/bsz<B>_seed<S>/`. Each `<method>_features.npz` also stores the checkpoint path that produced it, used as a provenance check.
 - **Eval → Merge.** Per-run `results.csv` files under `results/bsz<B>_<metric>_seed<S>/`. `merge_results.py` globs them all into the single master `ood_bootstrap.csv`.
@@ -288,7 +288,7 @@ Each pipeline's output goes to `logs/<key>.log` and its exit status to `logs/<ke
 
 ### Why setup is not pre-run
 
-Setup is neither disabled nor pre-run by `sweep.sh`. Because stage 1 is idempotent and `flock`-serialised, concurrent pipelines sort it out among themselves: the first does the work, the rest block briefly then fast-skip. This relies on the `flock` lock and the atomic `cfg.json` write.
+Setup is neither disabled nor pre-run by `sweep.sh`. Stage 1 is idempotent and `flock`-serialised (see [Installation](./Installation.md#the-automated-setup-stage)), so concurrent pipelines sort it out among themselves: the first does the work, the rest fast-skip.
 
 ---
 
@@ -367,8 +367,3 @@ See [Feature Extraction & Detection](./Detection.md).
 - **`data_shift_simulation.py`.** `simulate_data_shift(...)` builds a daily time series from in/out score pools with an injected post-shift OOD rate. (Upstream.) See [the drift simulation](./Data-Drift-Monitoring.md#the-drift-simulation-simulate_data_shift).
 - **`CUSUM_detector.py`.** `CUSUMChangeDetector` is a high/low-side CUSUM (`k = (k_th·σ)/2`, `h = control_limit·σ`) whose `changeDetection(...)` records false/true positives, detection delay, MTBFA, and false-alarm rate; `plotCUSUM(...)` draws the chart and `summary()` returns the table. (Upstream.) See [the change detector](./Data-Drift-Monitoring.md#the-change-detector-cusumchangedetector).
 
----
-
-## A note on upstream code
-
-A few modules are invoked by this pipeline but originate upstream, and are documented at the interface level rather than line-by-line: the base classes (`Model`, `FeatureSpace`) in `feature_methods/src/models/base.py`, the data loader and dataset class in `datasets/`, and the two SPC modules in `SPC_Charts/`. Where the flow depends on them, the relevant guide describes their behaviour. See [Feature Extraction & Detection](./Detection.md) and [Data-Drift Monitoring](./Data-Drift-Monitoring.md).

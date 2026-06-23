@@ -1,6 +1,6 @@
 # Feature Extraction & OOD Detection
 
-Stage 2 trains three feature extractors, each mapping a medical image to a fixed-length embedding; stage 3 caches those embeddings; stage 4a scores every test image against the in-distribution reference and bootstraps detection statistics into the master table. This guide covers the extractors and the scoring core together.
+Stage 2 trains three feature extractors, each mapping a medical image to a fixed-length embedding; stage 3 caches those embeddings; stage 4a scores every test image against the in-distribution reference and bootstraps detection statistics into the master table.
 
 Let an input image be `x ∈ ℝ^{3×28×28}` and `f_θ(x) ∈ ℝ^d` the feature it produces. The three methods differ in the map `f_θ`, the training objective, and the dimension `d`. A 28×28 grayscale image is replicated across three channels at the network input for all three.
 
@@ -118,7 +118,7 @@ np.savez(os.path.join(numpy_dir, "cnn_features"),
     cnn_pth=opt.cnn_path)        # provenance: which checkpoint produced these
 ```
 
-Each `FeatureSpace.get_features` batches the dataset, triples the grayscale channel, and returns the embedding defined above (the 100-d autoencoder latent, the 512-d CNN penultimate vector, or the L2-normalised 512-d contrastive output). After this stage the per-run `numpy_files/` folder holds one `data_splits.npz` and three `<method>_features.npz`, and training is no longer needed downstream.
+After this stage the per-run `numpy_files/` folder holds one `data_splits.npz` and three `<method>_features.npz`, and training is no longer needed downstream.
 
 ---
 
@@ -193,7 +193,7 @@ centroid, precision = lw.location_, lw.get_precision()
 distances.append(np.sqrt(max(diff @ precision @ diff.T, 0.0)))
 ```
 
-On first use it prints a diagnostic comparing the conditioning of the raw matrix (eigenvalue spread, effective rank, pinv cutoff and amplification) against the shrunk matrix (shrinkage `α`, eigenvalue floor, reduced condition number and amplification, and the negligible distortion of the top eigenvalue).
+On first use it prints a before/after diagnostic: the raw matrix's eigenvalue spread, effective rank, and pinv cutoff/amplification against the shrunk matrix's shrinkage `α` and eigenvalue floor.
 
 ### (b) `mahalanobis-solve`: direct solve (no explicit inverse)
 

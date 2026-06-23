@@ -46,12 +46,12 @@ So `k_th = 1` gives `k = 0.5σ`, and `control_limit = 4` gives `h = 4σ`. It com
 
 ## How the pipeline wires them (stage 4b, Figure 3)
 
-Since the upstream repository never connects `data_shift_simulation.py` and `CUSUM_detector.py` in normal code, stage 4b is an inline Python driver (a heredoc in `datamonitor.sh`) that uses both with the contrastive encoder under cosine scoring (the paper's chosen combination for Figure 3). The driver:
+Stage 4b is an inline Python driver (a heredoc in `datamonitor.sh`) that uses both modules with the contrastive encoder under cosine scoring (the paper's chosen combination for Figure 3). The driver:
 
 1. Loads the contrastive features and raw test labels for this run (`ctr_features.npz` + `data_splits.npz`).
 2. Computes the in-distribution centroid of the training features (`Ftr[ytr == 1].mean(0)`).
 3. Scores every test feature by cosine similarity to that centroid, splitting into an in-pool (`ytt == 1`) and an out-pool (`ytt == 0`).
-4. Feeds the pools to `simulate_data_shift` and the daily signal to `CUSUMChangeDetector`, configured to the paper's setting: 60 days total, 100 images/day, shift starting at day 31, post-shift OOD rate 4% (the midpoint of the paper's 3–5% range), and CUSUM with `k_th = 1` ⇒ `k = 0.5σ` and `control_limit = 4` ⇒ `h = 4σ`.
+4. Feeds the pools to `simulate_data_shift` and the daily signal to `CUSUMChangeDetector`, configured to the paper's setting: 60 days total, 100 images/day, shift starting at day 31, post-shift OOD rate 4% (the midpoint of the paper's 3–5% range), and CUSUM with `k_th = 1` and `control_limit = 4`.
 5. Saves the figure to `figures/bsz<B>_seed<S>/drift_ctr_cosine_figure3.png` and prints the detector's summary.
 
 ```python
@@ -70,7 +70,7 @@ det.changeDetection(
 )
 ```
 
-The internals of both modules are upstream and unmodified; the driver only sets their parameters and saves the figure. This figure always uses the contrastive/cosine combination, so it is metric-independent in the run-key sense and lives under the `bsz<B>_seed<S>` key.
+The driver only sets the modules' parameters and saves the figure, leaving their internals unmodified. This figure always uses the contrastive/cosine combination, so it is metric-independent in the run-key sense and lives under the `bsz<B>_seed<S>` key.
 
 ---
 

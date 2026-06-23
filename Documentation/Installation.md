@@ -1,6 +1,6 @@
 # Installation
 
-DataMonitor runs inside a Python virtual environment that the setup stage of `datamonitor.sh` builds for you. You normally configure `.env` and let the pipeline create the environment rather than installing anything by hand. This guide covers the prerequisites, what setup does, every configuration knob, and the known script-vs-`.env` inconsistencies.
+DataMonitor runs inside a Python virtual environment that the setup stage of `datamonitor.sh` builds, so you normally configure `.env` and let the pipeline create it rather than installing anything by hand. This guide covers the prerequisites, what setup does, every configuration knob, and the known script-vs-`.env` inconsistencies.
 
 ---
 
@@ -123,7 +123,7 @@ set +a
 `.env` mixes two assignment styles, which behave differently because the file is sourced under `set -a`:
 
 - **Soft / fallback assignments**, e.g. `DM_SEED="${DM_SEED:-2008}"`. If the variable is already set in the environment, `:-default` expands to the *existing* value, so a value the caller exported survives. This is why `sweep.sh` can set `DM_SEED`/`BATCH_SIZE` per pipeline and have them take effect.
-- **Hard assignments**, e.g. `VENV_DIR=./venv-py311`, `PYTHON_BIN=python3`. These always overwrite the environment, so they are fixed per machine.
+- **Hard assignments**, e.g. `VENV_DIR=./venv-py311`, `PYTHON_BIN=python3`, `DATA_DIR=data`. These always overwrite the environment, so they are fixed per machine.
 
 This reconciles two statements that look contradictory. The driver's header says ".env values unconditionally override the environment", true for the **hard** lines; `sweep.sh` relies on per-run overrides, true for the **soft** lines it touches. Precedence is decided line by line. If you intend to override a setting per run (via `sweep.sh` or `VAR=... ./datamonitor.sh`), make sure it is written in soft `${VAR:-default}` form in `.env`.
 
@@ -131,7 +131,7 @@ This reconciles two statements that look contradictory. The driver's header says
 
 ## Version note: Python 3.8 vs 3.11
 
-There is a real, intentional split in the codebase that can confuse a first read:
+An intentional split in the codebase can confuse a first read:
 
 - The **header comment** of `datamonitor.sh` and the script's *internal* defaults (`VENV_DIR=$REPO_DIR/.venv-py38`, `PYTHON_BIN=python3.8`) describe the *original* paper environment (Python 3.8, `torch 1.10`).
 - The **active configuration**, the committed `.env` and `requirements.lock.txt`, targets the *modernised* environment (Python 3.11, `torch 2.6`). `.env` sets `VENV_DIR=./venv-py311` and `PYTHON_BIN=python3` as hard assignments, and the setup version check expects 3.11.
@@ -142,7 +142,7 @@ The shipped `.env` wins, so a clean checkout builds a **Python 3.11** environmen
 
 ## Known configuration inconsistencies
 
-Several defaults differ between `datamonitor.sh`'s internal fallbacks and the committed `.env`. Because `.env` is sourced under `set -a`, the shipped `.env` value is what a clean checkout actually uses; the script's internal default only applies if that `.env` line is removed or commented out.
+Several defaults differ between `datamonitor.sh`'s internal fallbacks and the committed `.env`. As above, the shipped `.env` value is what a clean checkout uses; the script's default applies only if that `.env` line is removed.
 
 | Setting | `datamonitor.sh` default | Shipped `.env` value | Effective on clean checkout |
 | --- | --- | --- | --- |
@@ -154,7 +154,6 @@ Several defaults differ between `datamonitor.sh`'s internal fallbacks and the co
 
 Notes:
 
-- The **soft** `.env` values (`DM_SEED`, `BOOTSTRAP_N`, `USE_GPUS`, `DM_NUM_WORKERS`) can be overridden per run by exporting the variable first (exactly how `sweep.sh` sets `DM_SEED`/`BATCH_SIZE`). The **hard** ones (`VENV_DIR`, `PYTHON_BIN`, `DATA_DIR`) cannot be overridden without editing `.env`.
 - The paper used `BOOTSTRAP_N = 100`; the shipped `.env` raises this to 1000 for tighter bootstrap bands. Larger values are slower but do not change the deterministic seed (`random.seed(2022)`), so results stay reproducible.
 - The `.env` references a host-specific `VIRTUALENV_PYZ` path and some commented conda lines that are environment-specific; adjust or remove them for your machine.
 

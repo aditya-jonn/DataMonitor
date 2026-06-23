@@ -2,13 +2,13 @@
 
 **A pipeline for out-of-distribution (OOD) detection and data-drift monitoring on medical imaging, using statistical process control (SPC).**
 
-DataMonitor trains feature extractors on an in-distribution medical-image view, scores new images by their similarity or distance to that reference, and flags anomalies with SPC control charts. It then simulates a gradual distribution shift over time and detects the change point with a CUSUM chart. The repository runs one end-to-end experiment, reproducing the paper's master results table ("Table 3") and its drift figure ("Figure 3") across a grid of random seeds and batch sizes.
+DataMonitor trains feature extractors on an in-distribution medical-image view, scores new images by their similarity or distance to that reference, and flags anomalies with SPC control charts. It then simulates a gradual distribution shift and detects the change point with a CUSUM chart. The repository runs one end-to-end experiment, reproducing the paper's master results table ("Table 3") and its drift figure ("Figure 3") across a grid of random seeds and batch sizes.
 
 ---
 
 ## What the pipeline does
 
-The experiment crosses three feature extractors with four scoring metrics on the MedMNIST AbdominalCT dataset. The in-distribution class is one anatomical CT view (axial, `organamnist`); the off-axis views (coronal `organcmnist`, sagittal `organsmnist`) are out-of-distribution.
+The experiment crosses three feature extractors with four scoring metrics on the MedMNIST AbdominalCT dataset. The in-distribution class is one CT view (axial, `organamnist`); the off-axis views (coronal `organcmnist`, sagittal `organsmnist`) are out-of-distribution.
 
 | Stage | Entrypoint | Output |
 | --- | --- | --- |
@@ -108,7 +108,7 @@ Generated at run time (git-ignored): `data/`, `model_saves/`, `numpy_files/`, `r
 
 ![DataMonitor conceptual overview](./figs/DataMonitor.png)
 
-*Feature representation, then metrics, then SPC. A feature extractor maps each image to an embedding. A metric scores that embedding against the in-distribution reference. The score feeds an SPC control chart, and a score outside the control limits is flagged as out-of-distribution.*
+*Feature representation, then metric, then SPC: a feature extractor maps each image to an embedding, a metric scores it against the in-distribution reference, and a score outside the SPC control limits is flagged out-of-distribution.*
 
 ## Citation
 
@@ -122,4 +122,4 @@ The source code is maintained by DIDSR:
 
 - **GitHub:** [github.com/DIDSR/DataMonitor](https://github.com/DIDSR/DataMonitor)
 
-Please use the repository's issue tracker to report bugs, request features, or ask questions about the pipeline.
+Use the issue tracker to report bugs, request features, or ask questions.
