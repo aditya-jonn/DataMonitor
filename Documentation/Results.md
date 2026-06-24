@@ -16,7 +16,7 @@ It globs every `results/*/results.csv`, concatenates, sorts by `[Batch Size, See
 
 ## The seed × batch-size figure
 
-Trains each extractor across four batch sizes `{16, 32, 128, 256}` and ten seeds `1001–1010`, yielding 40 run keys. Each key is evaluated under all four metrics for all three methods (12 rows per key, 480 rows, a complete grid). `plot_seed_batch.py` renders the analysis figure (paper Figure 2) from the master CSV: one panel per method, mean detection accuracy versus batch size, with a ±1σ band across the random seeds.
+Trains each extractor across four batch sizes `{16, 32, 128, 256}` and ten seeds `1001–1010`, yielding 40 run keys. Each key is evaluated under all four metrics for all three methods (12 rows per key, 480 rows, a complete grid). `plot_seed_batch.py` renders the analysis figure from the master CSV: one panel per method, mean detection accuracy versus batch size, with a ±1σ band across the random seeds.
 
 ```bash
 python plot_seed_batch.py                                  # defaults
