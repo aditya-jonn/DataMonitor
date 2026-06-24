@@ -2,7 +2,7 @@
 
 **A pipeline for out-of-distribution (OOD) detection and data-drift monitoring on medical imaging, using statistical process control (SPC).**
 
-DataMonitor trains feature extractors on an in-distribution medical-image view, scores new images by their similarity or distance to that reference, and flags anomalies with SPC control charts. It then simulates a gradual distribution shift and detects the change point with a CUSUM chart. The repository runs one end-to-end experiment, reproducing the paper's master results table ("Table 3"), its seed × batch-size figure ("Figure 2"), and its drift figure ("Figure 3").
+DataMonitor trains feature extractors on an in-distribution medical-image view, scores new images by their similarity or distance to that reference, and flags anomalies with SPC control charts. It then simulates a gradual distribution shift and detects the change point with a CUSUM chart. The repository runs one end-to-end experiment, reproducing the paper's master results table ("Table 3") and its drift figure ("Figure 3"), and adds a seed × batch-size analysis over a sweep of runs.
 
 ---
 

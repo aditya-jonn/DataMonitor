@@ -16,3 +16,4 @@ logs/
 venv-py311/
 .setup.lock
 seed_batch_*.png
+*.patch

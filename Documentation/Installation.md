@@ -76,7 +76,7 @@ The dataset is the MedMNIST AbdominalCT family: `organamnist` (axial), `organcmn
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `BOOTSTRAP_N` | `1000` | Bootstrap resamples for the detection table. |
+| `BOOTSTRAP_N` | `100` | Bootstrap resamples for the detection table. |
 | `USE_GPUS` | `0` | Comma-separated CUDA device IDs → `CUDA_VISIBLE_DEVICES`. |
 | `EVAL_METRICS` | `cosine mahalanobis mahalanobis-solve mahalanobis-pinv` | Metrics to evaluate in stage 4a. |
 | `AUTOENCODER_CKPT`, `CNN_CKPT`, `CTR_CKPT` | auto-discovered | Explicit checkpoint paths (otherwise the newest matching `.pt`). |

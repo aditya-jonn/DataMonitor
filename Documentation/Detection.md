@@ -137,7 +137,7 @@ The training scores give a mean `s̄`, standard deviation `σ`, and three-sigma 
 
 ## The bootstrap (the master-table numbers)
 
-`ood_statistics` selects the metric's scoring function, computes the in-distribution centre and spread once, then resamples the test set `n` times. Each resample draws 100 test points without replacement under a fixed RNG (`random.seed(2022)`), scores them, applies Rule 1, and tallies a 2×2 confusion matrix, from which:
+`ood_statistics` selects the metric's scoring function, computes the in-distribution centre and spread once, then resamples the test set `n` times. Each resample draws 500 test points without replacement under a fixed RNG (`random.seed(2022)`), scores them, applies Rule 1, and tallies a 2×2 confusion matrix, from which:
 
 ```
 Accuracy = (tp+tn)/(tp+tn+fp+fn)   Sensitivity = tp/(tp+fn)   Specificity = tn/(tn+fp)

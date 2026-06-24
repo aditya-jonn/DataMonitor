@@ -419,7 +419,7 @@ def ood_statistics(tr_features, tt_features, ood_labels, metric, n=100, rule="Ru
     random.seed(2022)   # author's bootstrap RNG (Python random, not numpy)
     for i in tqdm(range(n), disable=None):
         # Pick a subset of the testing images
-        sample = random.sample(list(range(tt_features.shape[0])), k=100)   # author: no replacement, k=100
+        sample = random.sample(list(range(tt_features.shape[0])), k=500)   # no replacement, subset size m=500 (paper Table 3)
         tt_subset = tt_features[sample, :]
         ood_labels_subset = ood_labels[sample]
         # Calculate test similarities on subset
