@@ -1,0 +1,1303 @@
+diff --git a/Documentation/Architecture.md b/Documentation/Architecture.md
+index 0b0d04c..a63c22a 100644
+--- a/Documentation/Architecture.md
++++ b/Documentation/Architecture.md
+@@ -1,40 +1,23 @@
+ # Architecture
+ 
+-How the pipeline is structured and run: the naming convention that threads through every output, the four stages and what passes between them, the on-disk artifact tree, the two bash drivers in depth, and a file-by-file index.
++How the pipeline is structured and run: the naming convention that threads through every output, the four stages and what passes between them, the on-disk artifact tree, and the two bash drivers.
+ 
+ ---
+ 
+-## The run-key convention (read this first)
++## The run-key convention
+ 
+-The most important convention is the **run key**, because it names almost every output directory. A run is identified by its **batch size `B`** and **random seed `S`**, and most artifacts live in a per-run sub-folder `bsz<B>_seed<S>`. Two helpers in `utils.py` build the name:
++A run is identified by its **batch size `B`** and **random seed `S`**, and most artifacts live in a per-run folder `bsz<B>_seed<S>`. The helpers `run_name(batch_size, seed, metric=None)` and `make_run_dir(...)` in `utils.py` build the name; the optional `metric` splits artifacts into two groups:
+ 
+-```python
+-def run_name(batch_size, seed, metric=None):
+-    """e.g. 'bsz128_mahalanobis_seed42' or 'bsz128_seed42'."""
+-    parts = [f"bsz{batch_size}"]
+-    if metric is not None:
+-        parts.append(str(metric))
+-    parts.append(f"seed{seed}")
+-    return "_".join(parts)
++- **Metric-independent** (checkpoints, feature matrices): keyed `bsz<B>_seed<S>`. The same embedding feeds every metric, so features are computed once and reused, and every metric sees identical inputs.
++- **Metric-dependent** (per-run detection results, control-chart figures): keyed `bsz<B>_<metric>_seed<S>`, so the four metrics never overwrite each other.
+ 
+-def make_run_dir(root, batch_size, seed, metric=None):
+-    path = os.path.join(root, run_name(batch_size, seed, metric=metric))
+-    os.makedirs(path, exist_ok=True)
+-    return path
+-```
+-
+-The optional `metric` argument splits artifacts into two groups:
+-
+-- **Metric-independent artifacts** (checkpoints, feature matrices) are keyed by `bsz<B>_seed<S>` only. The same embedding feeds every metric, so computing features once and reusing them is faster and guarantees every metric sees identical inputs.
+-- **Metric-dependent artifacts** (per-run detection results, control-chart figures) are keyed by `bsz<B>_<metric>_seed<S>`, so the four metrics never overwrite each other.
+-
+-That is why a checkpoint lives in `model_saves/bsz128_seed42/` (no metric) but a result lives in `results/bsz128_mahalanobis_seed42/` (with metric).
++So a checkpoint lives in `model_saves/bsz128_seed42/` (no metric) but a result lives in `results/bsz128_mahalanobis_seed42/` (with metric).
+ 
+ ---
+ 
+ ## The four stages
+ 
+-Each stage is gated by an environment toggle, so any prefix of the pipeline can be skipped:
++Each stage is gated by a `RUN_<STAGE>=1/0` toggle (`if [[ "$RUN_<STAGE>" == "1" ]]`), so any prefix of the pipeline can be skipped:
+ 
+ ```
+ setup ──▶ train ──▶ extract ──▶ eval
+@@ -42,12 +25,10 @@ setup ──▶ train ──▶ extract ──▶ eval
+ 
+ | Stage | What it does | Key | Produced by |
+ | --- | --- | --- | --- |
+-| **setup** | Builds the Python environment, verifies committed shims, writes `cfg.json`. | none | `datamonitor.sh` |
++| **setup** | Builds the venv, verifies committed shims, writes `cfg.json`. | none | `datamonitor.sh` |
+ | **train** | Fits the three feature extractors and saves checkpoints. | `bsz<B>_seed<S>` | `train.py` |
+ | **extract** | Runs each checkpoint over the data splits and caches the feature matrices. | `bsz<B>_seed<S>` | `get_features.py` |
+-| **eval** | Scores those features with every metric, bootstraps detection statistics into the master table, and runs the drift simulation. | `bsz<B>_<metric>_seed<S>` | `ood_detection.py`, `merge_results.py` |
+-
+-Each stage is wrapped in `if [[ "$RUN_<STAGE>" == "1" ]]`. See [Common workflows](#common-workflows) for the usual toggle combinations.
++| **eval** | Scores features with every metric, bootstraps detection statistics into the master table, runs the drift simulation. | `bsz<B>_<metric>_seed<S>` | `ood_detection.py`, `merge_results.py` |
+ 
+ ---
+ 
+@@ -67,143 +48,84 @@ Each stage is wrapped in `if [[ "$RUN_<STAGE>" == "1" ]]`. See [Common workflows
+                                           data_splits.npz   results.csv           (+ CUSUM drift
+                                           <method>_         <m>_<method>_          figure)
+                                           features.npz      bootstrap.npz
+-                                                            figures/.../*_viz.png
+ ```
+ 
+-What each arrow carries:
+-
+-- **Setup → everything.** `cfg.json`'s `data_dir` and `table_path` are read by every Python entrypoint.
+-- **Train → Extract.** Checkpoints (`.pt`) under `model_saves/bsz<B>_seed<S>/`. The extract stage auto-discovers the newest matching checkpoint per method, or uses an explicit `*_CKPT` path.
+-- **Extract → Eval.** Feature matrices and materialised data splits under `numpy_files/bsz<B>_seed<S>/`. Each `<method>_features.npz` also stores the checkpoint path that produced it, used as a provenance check.
+-- **Eval → Merge.** Per-run `results.csv` files under `results/bsz<B>_<metric>_seed<S>/`. `merge_results.py` globs them all into the single master `ood_bootstrap.csv`.
++- **Setup → everything.** `cfg.json`'s `data_dir` and `table_path` are read by every entrypoint.
++- **Train → Extract.** Checkpoints under `model_saves/bsz<B>_seed<S>/`. Extract auto-discovers the newest matching checkpoint per method, or uses an explicit `*_CKPT` path.
++- **Extract → Eval.** Feature matrices and materialised splits under `numpy_files/bsz<B>_seed<S>/`. Each `<method>_features.npz` also stores the checkpoint path that produced it, for a provenance check.
++- **Eval → Merge.** Per-run `results.csv` files under `results/bsz<B>_<metric>_seed<S>/`; `merge_results.py` globs them into the single master `ood_bootstrap.csv`.
+ 
+ ---
+ 
+ ## The artifact tree
+ 
+-A completed run (or sweep) produces this tree. Generated directories are git-ignored.
++A completed run (or sweep) produces this tree (generated directories are git-ignored):
+ 
+ ```
+ DataMonitor/
+-├── cfg.json                                    # {data_dir, table_path}  (written by setup)
+-│
++├── cfg.json                                    # {data_dir, table_path} (written by setup)
+ ├── model_saves/
+-│   └── bsz<B>_seed<S>/                          # METRIC-INDEPENDENT key
++│   └── bsz<B>_seed<S>/                          # METRIC-INDEPENDENT
+ │       ├── conv-autoencoder_*.pt
+ │       ├── supervised-cnn_*.pt   (or resnet18_*.pt)
+ │       └── supervised-ctr_*.pt   (or SupCon_resnet18_*.pt)
+-│
+ ├── numpy_files/
+-│   └── bsz<B>_seed<S>/                          # METRIC-INDEPENDENT key
++│   └── bsz<B>_seed<S>/                          # METRIC-INDEPENDENT
+ │       ├── data_splits.npz                      # Xtr/ytr, Xvl/yvl, Xtt/ytt
+ │       ├── autoencoder_features.npz             # Ftr, Ftt, + checkpoint path (provenance)
+ │       ├── cnn_features.npz
+ │       └── ctr_features.npz
+-│
+ ├── results/
+-│   ├── bsz<B>_<metric>_seed<S>/                 # METRIC-DEPENDENT key
++│   ├── bsz<B>_<metric>_seed<S>/                 # METRIC-DEPENDENT
+ │   │   ├── results.csv                          # one row per method
+ │   │   └── <metric>_<method>_bootstrap.npz      # raw bootstrap arrays
+ │   └── ood_bootstrap.csv                        # MASTER table (atomically rebuilt)
+-│
+ ├── figures/
+-│   ├── bsz<B>_<metric>_seed<S>/                 # METRIC-DEPENDENT key
++│   ├── bsz<B>_<metric>_seed<S>/                 # METRIC-DEPENDENT
+ │   │   └── <metric>_<method>_viz.png            # control chart over the full test set
+-│   └── bsz<B>_seed<S>/                          # METRIC-INDEPENDENT key
++│   └── bsz<B>_seed<S>/                          # METRIC-INDEPENDENT
+ │       └── drift_ctr_cosine_figure3.png         # CUSUM drift figure
+-│
+ └── logs/                                        # per-run sweep logs + status files
+-    ├── bsz<B>_seed<S>.log
+-    └── bsz<B>_seed<S>.status
+ ```
+ 
+-The drift figure always uses the contrastive encoder under cosine scoring, so it is metric-independent and lives under the `bsz<B>_seed<S>` key; the control charts are metric-dependent.
++The drift figure always uses the contrastive encoder under cosine scoring, so it is metric-independent; the control charts are metric-dependent.
+ 
+ ---
+ 
+ ## Experimental grid
+ 
+-The full experiment crosses two axes, evaluating every `(method, metric)` pair.
++The full experiment evaluates every `(method, metric)` pair — 3 × 4 = 12 combinations per run key.
+ 
+-| Feature extractor (method) | Embedding used for OOD | Dim. |
++| Feature extractor (method) | OOD embedding | Dim. |
+ | --- | --- | --- |
+ | `autoencoder` (conv. AE, unsupervised) | encoder latent vector | 100 |
+ | `cnn` (ResNet-18, BCE + sigmoid head) | penultimate (pre-fc) vector | 512 |
+ | `ctr` (SupCon ResNet, contrastive) | L2-normalised encoder output | 512 |
+ 
+-| Metric (scoring function) | Rule |
++| Metric | Rule |
+ | --- | --- |
+ | `cosine` | cosine similarity to centroid (lower ⇒ OOD) |
+ | `mahalanobis` | Ledoit–Wolf precision matrix (higher ⇒ OOD) |
+ | `mahalanobis-solve` | Ledoit–Wolf covariance, Cholesky + triangular solve |
+ | `mahalanobis-pinv` | raw covariance + pseudo-inverse (baseline) |
+ 
+-That gives 3 × 4 = 12 `(method, metric)` combinations per run key. A binary label `y = 1` marks an in-distribution image and `y = 0` an OOD image throughout the codebase. (At the *scoring* step, `ood_detection.py` inverts these via `1 - ytt`, so a `1` there marks an OOD image. See [Feature Extraction & Detection](./Detection.md).)
++A binary label `y = 1` marks an in-distribution image and `y = 0` an OOD image throughout the codebase. At the *scoring* step, `ood_detection.py` inverts these (`1 - ytt`), so a `1` there marks OOD; see [Feature Extraction & Detection](./Detection.md).
+ 
+ ---
+ 
+ ## `datamonitor.sh`: the four-stage driver
+ 
+-`datamonitor.sh` runs the Python entrypoints (`train.py`, `get_features.py`, `ood_detection.py`) inside a controlled venv, under strict bash, with an error trap that reports the stage a failure died in.
+-
+-### Strict mode and the error trap
+-
+-```bash
+-set -Eeuo pipefail
+-IFS=$'\n\t'
+-```
+-
+-`-E` propagates the `ERR` trap into functions and subshells; `-e` exits on any unhandled non-zero return; `-u` aborts on an unset variable (hence the `${VAR:-default}` fallbacks everywhere); `-o pipefail` fails a pipeline if any stage fails. The custom `IFS` (newline + tab, no space) makes word-splitting safe for paths with spaces, with one consequence the eval loop works around (below).
+-
+-```bash
+-CURRENT_STAGE="(not started)"
+-on_error() {
+-    local rc=$?
+-    printf "\n[datamonitor] FAILED in stage: %s  (exit %d)\n" "$CURRENT_STAGE" "$rc" >&2
+-    exit "$rc"
+-}
+-trap on_error ERR
+-```
+-
+-`CURRENT_STAGE` is updated at the top of each stage (`"1/4 setup"`, `"2/4 train"`, ...), so a crash is legible even under `set -e`.
+-
+-### Configuration resolution
+-
+-Configuration is resolved once, up front, and echoed in a banner before any work begins: `SCRIPT_DIR` is computed so the script can run from anywhere, `.env` is sourced under `set -a`, and `${VAR:-default}` fills anything `.env` did not set. See [Installation → the precedence wrinkle](./Installation.md#the-precedence-wrinkle-read-this-before-sweeping) for why some `.env` values can be overridden per run and others cannot.
++`datamonitor.sh` runs the Python entrypoints inside the venv under strict bash (`set -Eeuo pipefail`, plus `IFS=$'\n\t'` — newline + tab, no space — for safe word-splitting on paths). An `ERR` trap updates `CURRENT_STAGE` at the top of each stage and reports which stage a failure died in, so a crash is legible even under `set -e`.
+ 
+-### Checkpoint discovery
++Configuration is resolved once and echoed in a banner before any work: `SCRIPT_DIR` lets the script run from anywhere, `.env` is sourced under `set -a`, and `${VAR:-default}` fills anything `.env` did not set. See [Installation → configuration precedence](./Installation.md#configuration-precedence) for why some `.env` values can be overridden per run and others cannot.
+ 
+-Discovery is scoped to the per-run sub-folder, so a model from a different batch size or seed can never be picked up by accident:
+-
+-```bash
+-find_newest_ckpt() {
+-    [[ -d "$MODEL_SAVES_DIR" ]] || { echo ""; return; }
+-    local run_dir="$MODEL_SAVES_DIR/$RUN_SUBDIR"   # bsz<B>_seed<S>
+-    for prefix in "$@"; do                         # prefixes in priority order
+-        hit="$(ls -t "$run_dir"/${prefix}_*.pt 2>/dev/null | head -1 || true)"
+-        if [[ -n "$hit" ]]; then echo "$hit"; return; fi
+-    done
+-    echo ""
+-}
+-```
+-
+-The per-method prefix lists are kept in one place (so a new naming scheme is a one-line edit) and encode the filename styles `train.py` has emitted over the project's life:
+-
+-```bash
+-AUTOENCODER_PREFIXES=( 'conv-autoencoder' 'autoencoder' )
+-CNN_PREFIXES=(         'supervised-cnn'   'resnet18' )
+-CTR_PREFIXES=(         'supervised-ctr'   'SupCon_resnet18' 'SupCon' )
+-```
+-
+-Both `resnet18_*.pt` and `supervised-cnn_*.pt` resolve to the CNN method. A `_prefixes_for <method>` helper maps a method keyword to its prefix array and is shared by the train and extract stages so they agree on naming.
++Checkpoint discovery is scoped to the per-run folder `model_saves/bsz<B>_seed<S>/`, so a model from a different batch size or seed is never picked up by accident. Per-method prefix lists (kept in one place, e.g. `supervised-cnn`/`resnet18` both resolving to the CNN) encode the filename styles `train.py` has emitted over the project's life; a `_prefixes_for` helper is shared by the train and extract stages so they agree on naming.
+ 
+ ### Stage 1: Setup
+-
+-Covered in [Installation → the automated setup stage](./Installation.md#the-automated-setup-stage): acquire the `flock` setup lock, validate the interpreter, build the venv from `requirements.lock.txt`, verify the committed bridge modules and source edits, write `cfg.json` atomically.
++Covered in [Installation → the automated setup stage](./Installation.md#the-automated-setup-stage): acquire the `flock` lock, validate the interpreter, build the venv from `requirements.lock.txt`, verify the committed bridge modules and source edits, write `cfg.json` atomically.
+ 
+ ### Stage 2: Train
+-
+-A `train_one` helper runs once per method, skipping a method whose checkpoint exists (unless `FORCE_TRAIN=1`) and otherwise invoking `train.py` with common + method-specific arguments:
++A `train_one` helper runs once per method, skipping a method whose checkpoint exists (unless `FORCE_TRAIN=1`) and otherwise invoking `train.py` with common arguments (dataset, method, learning rate, batch size, seed, max epochs, positive dataset) plus method-specific ones:
+ 
+ ```bash
+ train_one "conv-autoencoder" --c_hid 16 --latent_dim 100
+@@ -211,30 +133,13 @@ train_one "supervised-cnn"   --base_model "resnet18"
+ train_one "supervised-ctr"   --base_model "resnet18" --projection "mlp" --temp 0.07
+ ```
+ 
+-The common arguments (dataset, method, learning rate, batch size, seed, max epochs, positive dataset) are assembled once; each invocation runs from `REPO_DIR` so `train.py`'s relative paths resolve. See [Feature Extraction & Detection](./Detection.md) for what each method trains.
+-
+ ### Stage 3: Extract
+-
+-The extract stage resolves each checkpoint path (explicit `*_CKPT` env var, else newest matching `.pt`), then calls `get_features.py`. It also repairs a path mismatch: `get_features.py` writes features to a `numpy_files/` directory *sibling to* `DATA_DIR`, so if that is not already `NUMPY_FILES_DIR`, the script symlinks them together (comparing canonicalised paths so a relative `DATA_DIR` and an absolute `NUMPY_FILES_DIR` pointing at the same place are not falsely flagged). Pure path-rewriting is cleaner than monkey-patching the Python.
++Resolves each checkpoint path (explicit `*_CKPT`, else newest matching `.pt`), then calls `get_features.py`. It also repairs a path mismatch: `get_features.py` writes features to a `numpy_files/` directory *sibling to* `DATA_DIR`, so if that is not already `NUMPY_FILES_DIR`, the script symlinks them together (comparing canonicalised paths so a relative `DATA_DIR` and an absolute `NUMPY_FILES_DIR` are not falsely flagged).
+ 
+ ### Stage 4: Eval
++**4a — bootstrap detection.** `ood_detection.py` is invoked once per `(method, metric)` pair, looping over `autoencoder cnn ctr` × `EVAL_METRICS`. `EVAL_METRICS` is split with a locally-scoped `IFS=' '` (the script-wide `IFS` excludes spaces), then `merge_results.py` rebuilds the master CSV; a merge hiccup only *warns*, since a derived view must never fail the eval that produced the real per-run results.
+ 
+-**4a. Bootstrap detection (the master table).** `ood_detection.py` is invoked once per `(method, metric)` pair:
+-
+-```bash
+-for method in autoencoder cnn ctr; do
+-    IFS=' ' read -r -a _eval_metrics <<< "$EVAL_METRICS"   # split on spaces LOCALLY
+-    for metric in "${_eval_metrics[@]}"; do
+-        python ood_detection.py --metric "$metric" --method "$method" \
+-            --batch_size "$BATCH_SIZE" --seed "$DM_SEED" --bootstrap "$BOOTSTRAP_N"
+-    done
+-done
+-python merge_results.py
+-```
+-
+-The local `IFS=' '` override is needed because the script-wide `IFS` excludes spaces (strict mode); without it the space-separated `EVAL_METRICS` would not split. It is scoped to the `read`, so the global `IFS` is untouched. Afterwards `merge_results.py` rebuilds the master CSV, and a merge hiccup only *warns* (a derived view must never fail the eval that produced the real per-run results).
+-
+-**4b. Drift simulation (the drift figure).** An inline Python driver (a heredoc) wires together the two `SPC_Charts/` modules that the upstream code never connects in normal execution, scoring test features by cosine similarity to the contrastive in-distribution centroid and feeding the in/out pools to `simulate_data_shift` and `CUSUMChangeDetector`. See [Data-Drift Monitoring](./Data-Drift-Monitoring.md) for the parameters and the maths.
++**4b — drift simulation.** An inline Python driver wires together the two `SPC_Charts/` modules, scoring test features by cosine similarity to the contrastive in-distribution centroid. See [Data-Drift Monitoring](./Data-Drift-Monitoring.md).
+ 
+ ---
+ 
+@@ -243,52 +148,12 @@ The local `IFS=' '` override is needed because the script-wide `IFS` excludes sp
+ `sweep.sh` launches one full `datamonitor.sh` pipeline per `SEED:BATCH_SIZE` pair, throttled to `MAX_PARALLEL` concurrent jobs, then rebuilds the master table once.
+ 
+ ```bash
+-./sweep.sh                        # run DEFAULT_CONFIGS  (2001:128 2002:128 2001:256 2002:256)
++./sweep.sh                        # run DEFAULT_CONFIGS (2001:128 2002:128 2001:256 2002:256)
+ ./sweep.sh 2001:128 2002:128      # explicit SEED:BATCH_SIZE pairs
+-RUN_TRAIN=0 RUN_EXTRACT=0 ./sweep.sh 2001:128   # stage toggles pass through to each pipeline
++RUN_TRAIN=0 RUN_EXTRACT=0 ./sweep.sh 2001:128   # stage toggles pass through
+ ```
+ 
+-It runs under `set -uo pipefail` (deliberately not `-e`, for reasons below).
+-
+-### Refusing duplicate run keys
+-
+-Two pipelines writing the same `bsz<B>_seed<S>` folder would race, so the sweep refuses duplicates up front:
+-
+-```bash
+-declare -A seen
+-for cfg in "${configs[@]}"; do
+-    IFS=: read -r seed bsz <<< "$cfg"
+-    # ...validate both are integers...
+-    key="bsz${bsz}_seed${seed}"
+-    if [[ -n "${seen[$key]:-}" ]]; then
+-        echo "[sweep] duplicate run key $key — one pipeline per key." >&2
+-        exit 1
+-    fi
+-    seen[$key]=1
+-done
+-```
+-
+-### Throttling
+-
+-New launches are gated behind a live job count rather than `wait -n`, for portability to older bash (`wait -n` needs bash ≥ 4.3 and silently degrades to launch-everything when missing, which is exactly why the script avoids `set -e`):
+-
+-```bash
+-if (( MAX_PARALLEL > 0 )); then
+-    while (( $(jobs -pr | wc -l) >= MAX_PARALLEL )); do
+-        sleep 5   # polling granularity is negligible vs pipeline runtime
+-    done
+-fi
+-(
+-    DM_SEED="$seed" BATCH_SIZE="$bsz" ./datamonitor.sh > "$log" 2>&1
+-    echo $? > "logs/${key}.status"
+-) &
+-```
+-
+-Each pipeline's output goes to `logs/<key>.log` and its exit status to `logs/<key>.status`. After all pipelines finish, the sweep prints a per-run verdict (`OK`/`FAIL`) from the status files, then runs `merge_results.py` once. If any run failed, the sweep exits non-zero but the master table still contains the successful runs.
+-
+-### Why setup is not pre-run
+-
+-Setup is neither disabled nor pre-run by `sweep.sh`. Stage 1 is idempotent and `flock`-serialised (see [Installation](./Installation.md#the-automated-setup-stage)), so concurrent pipelines sort it out among themselves: the first does the work, the rest fast-skip.
++It runs under `set -uo pipefail` (deliberately not `-e`). It refuses duplicate run keys up front (two pipelines writing the same `bsz<B>_seed<S>` folder would race), and gates new launches behind a live job count rather than `wait -n` (which needs bash ≥ 4.3 and degrades silently when missing — the reason the script avoids `set -e`). Each pipeline's output goes to `logs/<key>.log` and its exit status to `logs/<key>.status`; after all finish, the sweep prints a per-run `OK`/`FAIL` verdict and runs `merge_results.py` once. If any run failed, the sweep exits non-zero but the master table still contains the successful runs. Setup is neither disabled nor pre-run: stage 1 is idempotent and `flock`-serialised, so concurrent pipelines sort it out among themselves.
+ 
+ ---
+ 
+@@ -307,63 +172,4 @@ Setup is neither disabled nor pre-run by `sweep.sh`. Stage 1 is idempotent and `
+ 
+ ## File reference
+ 
+-A file-by-file index. Follow the cross-links for conceptual depth.
+-
+-### Orchestration
+-
+-| File | Role |
+-| --- | --- |
+-| `datamonitor.sh` | The four-stage driver, detailed above. |
+-| `sweep.sh` | Parallel multi-run driver, detailed above. |
+-| `.env` | Per-machine config, auto-loaded under `set -a`; soft (`${VAR:-default}`) and hard assignments. See [Installation](./Installation.md#configuration-the-env-file). |
+-| `requirements.lock.txt` / `requirements.txt` | The committed modern lockfile (Python 3.11, torch 2.6) the pipeline installs from, and the original upstream pin set (Python ≤3.10, torch 1.10) for reference. See [Installation](./Installation.md#prerequisites). |
+-
+-### Python entrypoints
+-
+-**`train.py` (stage 2).** Parses CLI options into an `options` dict, derives the in-distribution view name from `positive_dataset` (`organamnist → "Axial"`), builds a per-run checkpoint folder, and makes training reproducible before touching data. `_seed_everything(seed)` fixes the Python/numpy/torch RNGs, sets `PYTHONHASHSEED`, seeds CUDA, and forces deterministic cuDNN; `_seed_worker` handles per-worker dataloader seeding; `main()` builds seeded `DataLoader`s then calls `load_model` and `feature_model.train_model(...)`. Default seed is `DM_SEED` or `1001`. See [Feature Extraction & Detection](./Detection.md).
+-
+-**`get_features.py` (stage 3).** Loads data with `method="none"` (no two-crop transform), materialises the splits with `matrixify` into `data_splits.npz`, then for each of the three checkpoints loads the model in `testing` mode, runs the matching `FeatureSpace`, and saves `<method>_features.npz` with the train/test feature matrices and the originating checkpoint path (for the provenance guard). See [Feature Extraction & Detection](./Detection.md#feature-extraction-stage-3).
+-
+-**`ood_detection.py` (stage 4a).** The scoring + bootstrap core; promotes `RuntimeWarning` to errors at import. Key functions:
+-
+-- `compute_cosine_similarity(tr, tt)`: cosine similarity to the centroid.
+-- `compute_mahalanobis_distance(tr, tt)`: Ledoit–Wolf precision (production), cached + one-time diagnostics.
+-- `compute_mahalanobis_distance_solve(tr, tt)`: same covariance, Cholesky + triangular solve (no inverse).
+-- `compute_mahalanobis_distance_pinv(tr, tt)`: raw covariance + pseudo-inverse baseline (cached, float64, clamped).
+-- `OLD_compute_mahalanobis_distance(tr, tt)`: the original pinv estimator, kept for reference.
+-- `apply_spc_rules(data, mean, std, metric)`: one-sided Rule 1 (lower tail for cosine, upper tail for Mahalanobis).
+-- `compute_control_limits(...)`: train scores → mean, std, `UCL = mean+3σ`, `LCL = mean−3σ`.
+-- `ood_statistics(...)`: the bootstrap (fixed `random.seed(2022)`, 100 points without replacement, confusion-matrix stats).
+-- `ood_visualization(...)`: the per-run control-chart figure.
+-- `main()`: loads splits + features, runs the provenance guard, scores, writes the per-run `results.csv`, `*_bootstrap.npz`, and the control chart.
+-
+-See [Feature Extraction & Detection](./Detection.md).
+-
+-**`merge_results.py` (stage 4 aggregator).** `load_master()` globs `results/*/results.csv` and sorts; `write_master()` writes atomically (PID-unique temp + `os.replace`); `render()` prints the grouped, best-accuracy-highlighted table (rich or plain); `--quiet` skips rendering. See [Results & Limitations](./Results-and-Limitations.md#reproducing-the-master-table).
+-
+-**`plot_seed_batch.py`.** Renders the seed × batch-size figure (paper Figure 2) from the master CSV; drops `mahalanobis-solve` (bit-identical duplicate), keeps `mahalanobis-pinv` dashed; flags `--csv`, `--out`, `--metric`, `--print-summary`. See [Results & Limitations](./Results-and-Limitations.md#reproducing-the-seed--batch-size-figure).
+-
+-**`verify_maha_solve.py`.** Standalone numerical-correctness harness: phase A (always) tests the production solve code on synthetic ill-conditioned data; phase B (if `ood_detection` imports) cross-checks the repo's own functions. See [Feature Extraction & Detection](./Detection.md#verification-harness-verify_maha_solvepy).
+-
+-**`utils.py`.** `set_seed(random_seed)`, `run_name(batch_size, seed, metric=None)` (the run-key string), and `make_run_dir(...)` (create + return the per-run directory).
+-
+-### `datasets/`
+-
+-- **`datasets/__init__.py`.** `load_data(options)` builds train/val/test `AbnominalCTDataset`s; for `method=="supervised-ctr"` it wraps the transform in `TwoCropTransform` (RandomResizedCrop + RandomRotation) for two augmented crops, while `method="none"` yields single images. `matrixify(dset)` flattens a dataset into an `(N, 784)` matrix `X` and a label vector `y`.
+-- **`datasets/medmnist_abdominalCT.py`.** `AbnominalCTDataset` concatenates `organ{a,c,s}mnist`, shuffles with a local RNG (does not touch global RNG state), and under `label_mode="cheap-supervised"` returns `(image, 1)` for the in-distribution view and `(image, 0)` for the others. Downloads the `.npz` files on first use. (Upstream-derived.)
+-
+-### `feature_methods/`
+-
+-- **`__init__.py`, `supcon_loss.py`.** Top-level shims re-exporting `load_model`/`load_eval` and `SupConLoss`/`TwoCropTransform` from `src`.
+-- **`src/__init__.py`.** The registry: `load_model(options, mode)` and `load_eval(model, ...)` dispatch on the method key. See [the bridge layer](./Detection.md#the-bridge-layer).
+-- **`src/base.py`, `src/models/base.py`.** `base.py` re-exports `Model`/`FeatureSpace`; `models/base.py` defines the abstract `Model` (optimiser/scheduler scaffold and the abstract `init_model`/`set_loss_function`/`train_one_epoch`/`_key`) and `FeatureSpace`. (Upstream.)
+-- **`src/conv_autoencoder.py`, `src/Unsuper_conv_autoencoder.py`.** A thin `_key()` wrapper plus the `Encoder`/`Decoder`/`ConvAutoEncoderCore`, the `ConvAutoEncoder` (MSE loss), and `ConvAutoEncoderFeatureSpace` (100-d latent). See [autoencoder](./Detection.md#1-convolutional-autoencoder-conv-autoencoder).
+-- **`src/ood_supervised_cnn.py`.** `_ResNet18Binary` (ResNet-18 + `Linear(512,2)` + `Sigmoid`, with a `features()` path to the 512-d penultimate vector), `OODSupervisedCNN` (BCE loss), `OODSupervisedCNNFeatureSpace`. See [CNN](./Detection.md#2-ood-supervised-cnn-supervised-cnn).
+-- **`src/ood_supervised_ctr.py`.** A self-contained CIFAR-style ResNet, the canonical multi-view `_SupConLoss`, `OODSupervisedCTR` (two-crop training), `OODSupervisedCTRFeatureSpace` (L2-normalised 512-d output). See [contrastive](./Detection.md#3-supervised-contrastive-encoder-supervised-ctr).
+-- **`src/supcon_loss.py`.** The canonical `SupConLoss` (Khosla et al., supports SimCLR fallback) and `TwoCropTransform`.
+-
+-### `SPC_Charts/`
+-
+-- **`data_shift_simulation.py`.** `simulate_data_shift(...)` builds a daily time series from in/out score pools with an injected post-shift OOD rate. (Upstream.) See [the drift simulation](./Data-Drift-Monitoring.md#the-drift-simulation-simulate_data_shift).
+-- **`CUSUM_detector.py`.** `CUSUMChangeDetector` is a high/low-side CUSUM (`k = (k_th·σ)/2`, `h = control_limit·σ`) whose `changeDetection(...)` records false/true positives, detection delay, MTBFA, and false-alarm rate; `plotCUSUM(...)` draws the chart and `summary()` returns the table. (Upstream.) See [the change detector](./Data-Drift-Monitoring.md#the-change-detector-cusumchangedetector).
+-
++The [repository layout](../README.md#repository-layout) lists every source file. For conceptual depth: the three extractors, the bridge/registry layer, scoring, and the bootstrap are in [Feature Extraction & Detection](./Detection.md); the drift modules in [Data-Drift Monitoring](./Data-Drift-Monitoring.md); the table and figure builders (`merge_results.py`, `plot_seed_batch.py`) in [Results & Limitations](./Results-and-Limitations.md); and `utils.py` provides `set_seed`, `run_name`, and `make_run_dir`.
+diff --git a/Documentation/Data-Drift-Monitoring.md b/Documentation/Data-Drift-Monitoring.md
+index 2624b0a..95d2010 100644
+--- a/Documentation/Data-Drift-Monitoring.md
++++ b/Documentation/Data-Drift-Monitoring.md
+@@ -1,6 +1,6 @@
+ # Data-Drift Monitoring
+ 
+-Beyond per-image OOD detection, DataMonitor simulates a gradual distribution shift over time and detects the change point with a CUSUM control chart. This is stage 4b, which produces the paper's drift figure ("Figure 3"). The two `SPC_Charts/` modules are upstream code (described here at the interface level); the novel part is the inline driver in `datamonitor.sh` that connects them, something the upstream repository only ever did inside example notebooks.
++Beyond per-image OOD detection, DataMonitor simulates a gradual distribution shift over time and detects the change point with a CUSUM control chart. This is stage 4b, which produces the paper's drift figure ("Figure 3"). The two `SPC_Charts/` modules are upstream code, documented here at the interface level; the inline driver in `datamonitor.sh` is what wires them together.
+ 
+ ---
+ 
+@@ -8,14 +8,7 @@ Beyond per-image OOD detection, DataMonitor simulates a gradual distribution shi
+ 
+ *File: `SPC_Charts/data_shift_simulation.py`.*
+ 
+-`simulate_data_shift` turns two pools of per-image scores (in-distribution and out-of-distribution) into a daily time series with an injected shift.
+-
+-```python
+-simulate_data_shift(in_dist_data, out_dist_data, shift_start_day,
+-                    total_days, images_per_day, shift_percentage)
+-```
+-
+-For each day it draws `images_per_day` scores. Before `shift_start_day`, none come from the OOD pool; from `shift_start_day` onward, `shift_percentage`% come from the OOD pool and the rest from the in-distribution pool (both sampled without replacement within a day). It returns `daily_averages` (one mean score per day, the signal the CUSUM chart monitors), `all_data` (the full concatenated per-image scores), and the `shift_start_day`/`shift_percentage` echoed back. The premise is that mixing in OOD images shifts the daily-average score, which a control chart should detect shortly after it begins.
++`simulate_data_shift(in_dist_data, out_dist_data, shift_start_day, total_days, images_per_day, shift_percentage)` turns two pools of per-image scores into a daily time series with an injected shift. Each day it draws `images_per_day` scores: before `shift_start_day`, none from the OOD pool; from `shift_start_day` onward, `shift_percentage`% from the OOD pool and the rest from the in-distribution pool (sampled without replacement within a day). It returns `daily_averages` (one mean score per day, the signal the CUSUM chart monitors), the concatenated per-image scores, and the shift day/percentage echoed back. The premise: mixing in OOD images shifts the daily-average score, which a control chart should detect shortly after it begins.
+ 
+ ---
+ 
+@@ -23,7 +16,7 @@ For each day it draws `images_per_day` scores. Before `shift_start_day`, none co
+ 
+ *File: `SPC_Charts/CUSUM_detector.py`.*
+ 
+-A CUSUM (cumulative sum) chart accumulates demeaned, slack-adjusted deviations and alarms when the running sum crosses a limit. The detector computes a high-side and a low-side statistic:
++A CUSUM chart accumulates demeaned, slack-adjusted deviations and alarms when the running sum crosses a limit. It tracks a high-side and a low-side statistic:
+ 
+ ```
+ S_hi[t] = max(0, S_hi[t−1] + (x[t] − µ₀ − k))
+@@ -31,54 +24,29 @@ S_lo[t] = min(0, S_lo[t−1] + (x[t] − µ₀ + k))
+ alarm when  S_hi > h  or  S_lo < −h
+ ```
+ 
+-where `x[t]` is the daily-average signal, `µ₀` is the in-control mean (estimated from the pre-change days), `k` is the reference value (slack), and `h` is the decision interval (control limit).
+-
+-`changeDetection(...)` splits the signal into in-control (`[:pre_change_days]`) and out-of-control (`[pre_change_days:total_days]`) periods, estimates `µ₀` and the in-control standard deviation `σ` from the in-control period, and sets:
+-
+-```
+-k = (k_th · σ) / 2          # reference value, in multiples of σ
+-h = control_limit · σ       # decision threshold, in multiples of σ
+-```
+-
+-So `k_th = 1` gives `k = 0.5σ`, and `control_limit = 4` gives `h = 4σ`. It computes the high/low CUSUM, plots them (`plotCUSUM`, with the threshold lines and the detected shift), and records a one-row summary: the `k` value, threshold, false-positive count (alarms before the true shift), true-positive count, average detection delay (days from the true shift to the first alarm), the mean time between false alarms (MTBFA), and the false-alarm rate (`1/MTBFA`). `summary()` returns that table as a string.
++where `x[t]` is the daily-average signal, `µ₀` is the in-control mean, `k` is the reference value (slack), and `h` is the decision interval. `changeDetection(...)` splits the signal into in-control (`[:pre_change_days]`) and out-of-control (`[pre_change_days:total_days]`) periods, estimates `µ₀` and the in-control standard deviation `σ` from the in-control period, and sets `k = (k_th · σ)/2` and `h = control_limit · σ`. So `k_th = 1` gives `k = 0.5σ` and `control_limit = 4` gives `h = 4σ`. It computes the CUSUM statistics, plots them (`plotCUSUM`), and records a one-row summary: `k`, threshold, false-positive count (alarms before the true shift), true-positive count, average detection delay, mean time between false alarms (MTBFA), and false-alarm rate. `summary()` returns that table as a string.
+ 
+ ---
+ 
+ ## How the pipeline wires them (stage 4b, Figure 3)
+ 
+-Stage 4b is an inline Python driver (a heredoc in `datamonitor.sh`) that uses both modules with the contrastive encoder under cosine scoring (the paper's chosen combination for Figure 3). The driver:
++Stage 4b is an inline Python driver (a heredoc in `datamonitor.sh`) that uses both modules with the contrastive encoder under cosine scoring, the paper's chosen combination for Figure 3. The driver:
+ 
+ 1. Loads the contrastive features and raw test labels for this run (`ctr_features.npz` + `data_splits.npz`).
+ 2. Computes the in-distribution centroid of the training features (`Ftr[ytr == 1].mean(0)`).
+ 3. Scores every test feature by cosine similarity to that centroid, splitting into an in-pool (`ytt == 1`) and an out-pool (`ytt == 0`).
+-4. Feeds the pools to `simulate_data_shift` and the daily signal to `CUSUMChangeDetector`, configured to the paper's setting: 60 days total, 100 images/day, shift starting at day 31, post-shift OOD rate 4% (the midpoint of the paper's 3–5% range), and CUSUM with `k_th = 1` and `control_limit = 4`.
++4. Feeds the pools to `simulate_data_shift` and the daily signal to `CUSUMChangeDetector`, at the paper's setting: 60 days, 100 images/day, shift at day 31, post-shift OOD rate 4% (the midpoint of the paper's 3–5% range), `k_th = 1`, `control_limit = 4`.
+ 5. Saves the figure to `figures/bsz<B>_seed<S>/drift_ctr_cosine_figure3.png` and prints the detector's summary.
+ 
+-```python
+-daily_avg, _, shift_day, _ = simulate_data_shift(
+-    in_dist_data=in_pool, out_dist_data=out_pool,
+-    shift_start_day=31, total_days=60, images_per_day=100,
+-    shift_percentage=4.0,
+-)
+-det = CUSUMChangeDetector(pre_change_days=30, total_days=60)
+-det.changeDetection(
+-    CUSUM_data_average_day=daily_avg,
+-    pre_change_days=30, total_days=60,
+-    control_limit=4.0,   # h = 4·σ
+-    k_th=1.0,            # k_th=1 → k = (1·σ)/2 = 0.5σ
+-    save_plot=False,     # the driver saves to its own path
+-)
+-```
+-
+-The driver only sets the modules' parameters and saves the figure, leaving their internals unmodified. This figure always uses the contrastive/cosine combination, so it is metric-independent in the run-key sense and lives under the `bsz<B>_seed<S>` key.
++The driver only sets the modules' parameters and saves the figure, leaving their internals unmodified. This figure always uses the contrastive/cosine combination, so in the run-key sense it is metric-independent and lives under the `bsz<B>_seed<S>` key.
+ 
+ ---
+ 
+ ## Relationship to per-image OOD detection
+ 
+-Per-image OOD detection (stage 4a) and drift monitoring (stage 4b) share the same idea (score against an in-distribution reference, then apply an SPC chart) but operate at different granularities:
++Per-image OOD detection (stage 4a) and drift monitoring (stage 4b) share the same idea at different granularities:
+ 
+-- **Stage 4a / Shewhart:** one score *per image*; a single image outside the 3σ band is flagged. This measures detection quality on a static test set (the bootstrap table).
+-- **Stage 4b / CUSUM:** one score *per day* (a daily average); the chart accumulates small deviations over time and alarms when a *sustained* shift has occurred. This measures how quickly a gradual population drift is detected.
++- **Stage 4a:** one score *per image*; a single image outside the 3σ band is flagged. Measures detection quality on a static test set (the bootstrap table).
++- **Stage 4b / CUSUM:** one score *per day* (a daily average); the chart accumulates small deviations and alarms when a *sustained* shift has occurred. Measures how quickly a gradual drift is detected.
+ 
+-A Shewhart chart reacts to large single-point excursions; a CUSUM chart is tuned to detect small, persistent mean shifts, the right tool for a slowly drifting data stream.
++A CUSUM chart is tuned to detect small, persistent mean shifts, the right tool for a slowly drifting data stream.
+diff --git a/Documentation/Detection.md b/Documentation/Detection.md
+index 49ef37b..07dbe93 100644
+--- a/Documentation/Detection.md
++++ b/Documentation/Detection.md
+@@ -2,7 +2,7 @@
+ 
+ Stage 2 trains three feature extractors, each mapping a medical image to a fixed-length embedding; stage 3 caches those embeddings; stage 4a scores every test image against the in-distribution reference and bootstraps detection statistics into the master table.
+ 
+-Let an input image be `x ∈ ℝ^{3×28×28}` and `f_θ(x) ∈ ℝ^d` the feature it produces. The three methods differ in the map `f_θ`, the training objective, and the dimension `d`. A 28×28 grayscale image is replicated across three channels at the network input for all three.
++Let an input image be `x ∈ ℝ^{3×28×28}` and `f_θ(x) ∈ ℝ^d` the feature it produces. A 28×28 grayscale image is replicated across three channels at the network input for all three methods, which differ in the map `f_θ`, the training objective, and the dimension `d`.
+ 
+ | Method (`--method`) | Architecture | Objective | OOD embedding | `d` |
+ | --- | --- | --- | --- | --- |
+@@ -16,7 +16,7 @@ Let an input image be `x ∈ ℝ^{3×28×28}` and `f_θ(x) ∈ ℝ^d` the featur
+ 
+ Both abstract base classes live in `feature_methods/src/models/base.py` (upstream code).
+ 
+-**`Model`** provides the shared training scaffold. Its `__init__` builds the network (`init_model`), sets the loss (`set_loss_function`), creates an `AdamW` optimiser at `learning_rate` and a `MultiStepLR` scheduler that drops the LR 10× at 50% and 75% of `max_epochs`, and tracks `best_loss`/`best_epoch_number`/`current_epoch_number` plus the loss histories. Each subclass supplies four things: `init_model()` (build the network), `set_loss_function()` (return the loss module), `train_one_epoch(train_loader, val_loader)` (one train/validate pass plus best-model bookkeeping), and a static `_key()` (the method's string key, e.g. `"conv-autoencoder"`). The base class provides `train_model` (loops over `max_epochs`), `save_model` (a checkpoint dict with the state dict, full `options`, optimiser state, epoch, and validation loss), and `load`.
++**`Model`** provides the shared training scaffold: an `AdamW` optimiser at `learning_rate` and a `MultiStepLR` scheduler that drops the LR 10× at 50% and 75% of `max_epochs`, plus best-loss/epoch bookkeeping. Each subclass supplies `init_model()` (build the network), `set_loss_function()`, `train_one_epoch(train_loader, val_loader)` (one train/validate pass plus best-model bookkeeping), and a static `_key()` (the method's string key). The base provides `train_model` (the epoch loop), `save_model` (a checkpoint dict with the state dict, full `options`, optimiser state, epoch, and validation loss), and `load`.
+ 
+ **`FeatureSpace`** wraps a trained `Model` and computes embeddings for the train/val/test splits at construction. Each subclass implements `get_features(dset)`: batch the dataset, triple the grayscale channel, run the model's feature path, and return the embedding stack as a NumPy array.
+ 
+@@ -24,15 +24,15 @@ Both abstract base classes live in `feature_methods/src/models/base.py` (upstrea
+ 
+ ## The bridge layer
+ 
+-Several small modules exist only to wire the package together. They are committed source, verified (not generated) at setup.
++Several small modules wire the package together. They are committed source, verified (not generated) at setup:
+ 
+-- **`feature_methods/__init__.py`** re-exports `load_model` (and the rest of `src`) so `from feature_methods import load_model` resolves.
+-- **`feature_methods/src/__init__.py`** is the **registry**: `load_model(options, mode="training")` dispatches on `options["method"]` (via each class's `_key()`) to build the right `Model` subclass, and loads the checkpoint at `options["save_path"]` when `mode="testing"`; `load_eval(model, train, val, test)` builds the matching `FeatureSpace`.
++- **`feature_methods/__init__.py`** re-exports `load_model` so `from feature_methods import load_model` resolves.
++- **`feature_methods/src/__init__.py`** is the **registry**: `load_model(options, mode="training")` dispatches on `options["method"]` (via each class's `_key()`) to build the right `Model` subclass, loading the checkpoint at `options["save_path"]` when `mode="testing"`; `load_eval(model, train, val, test)` builds the matching `FeatureSpace`.
+ - **`feature_methods/src/base.py`** re-exports `Model`/`FeatureSpace` from `models/base.py`.
+ - **`feature_methods/src/conv_autoencoder.py`** subclasses the upstream autoencoder and adds the `_key()` the registry dispatches on (the upstream class lacks it).
+-- **`feature_methods/supcon_loss.py`** and **`feature_methods/src/supcon_loss.py`** provide the canonical `SupConLoss` and `TwoCropTransform`; the top-level one is a re-export shim so `datasets/__init__.py` can import `TwoCropTransform`.
++- **`feature_methods/supcon_loss.py`** re-exports `SupConLoss`/`TwoCropTransform` so `datasets/__init__.py` can import `TwoCropTransform`.
+ 
+-This indirection lets `train.py` and `get_features.py` stay method-agnostic: they call `load_model`/`load_eval` and the registry picks the implementation.
++`train.py` and `get_features.py` stay method-agnostic: they call `load_model`/`load_eval` and the registry picks the implementation.
+ 
+ ---
+ 
+@@ -40,15 +40,10 @@ This indirection lets `train.py` and `get_features.py` stay method-agnostic: the
+ 
+ *File: `feature_methods/src/Unsuper_conv_autoencoder.py` (plus the `_key()` wrapper in `conv_autoencoder.py`). Unsupervised.*
+ 
+-An encoder-decoder trained to reconstruct its input. The encoder applies five 3×3 convolutions (three with stride 2, each halving the spatial resolution), grows the channels `3 → c_hid → 2·c_hid`, then flattens and projects to a latent vector. With `c_hid = 16`, a 28×28 input downsamples to a 4×4 map with 32 channels, flattens to 512, and projects to a 100-d latent. The decoder mirrors this with transposed convolutions back to 3×28×28 and a `tanh` output. The objective is pixel-wise mean-squared reconstruction error:
+-
+-```
+-z = E(x) ∈ ℝ^100,   x̂ = D(z),   L_AE = (1/N) Σ_i ‖x_i − x̂_i‖²₂
+-```
++An encoder-decoder trained to reconstruct its input. The encoder applies five 3×3 convolutions (three stride-2, each halving resolution), growing channels `3 → c_hid → 2·c_hid`, then flattens and projects to a latent. With `c_hid = 16`, a 28×28 input downsamples to a 4×4 × 32 map, flattens to 512, and projects to a 100-d latent; the decoder mirrors this back to 3×28×28 with a `tanh` output. The objective is pixel-wise mean-squared reconstruction error `L_AE = (1/N) Σ ‖x − x̂‖²`.
+ 
+ - **Best checkpoint:** lowest validation reconstruction loss.
+-- **OOD embedding:** the 100-d encoder latent, exposed by `features(x) = encoder(x)`.
+-- **Premise:** a network trained to reconstruct in-distribution images maps them to a compact latent region, whereas poorly-reconstructed off-axis images land elsewhere. (In practice this signal is weak on these views; see [Results & Limitations](./Results-and-Limitations.md).)
++- **OOD embedding:** the 100-d encoder latent (`features(x) = encoder(x)`).
+ 
+ ---
+ 
+@@ -56,16 +51,10 @@ z = E(x) ∈ ℝ^100,   x̂ = D(z),   L_AE = (1/N) Σ_i ‖x_i − x̂_i‖²₂
+ 
+ *File: `feature_methods/src/ood_supervised_cnn.py`.*
+ 
+-A torchvision **ResNet-18** (randomly initialised unless `--pretrained`) whose final `fc` is replaced by `Linear(512, 2)` + `Sigmoid`, trained as a binary ID-versus-OOD classifier with binary cross-entropy on one-hot targets:
+-
+-```
+-L_BCE = −(1/N) Σ_i Σ_{c∈{0,1}} [ y_{ic} log ŷ_{ic} + (1 − y_{ic}) log(1 − ŷ_{ic}) ]
+-```
++A torchvision **ResNet-18** (randomly initialised unless `--pretrained`) whose final `fc` is replaced by `Linear(512, 2)` + `Sigmoid`, trained as a binary ID-vs-OOD classifier with binary cross-entropy on one-hot targets.
+ 
+ - **Best checkpoint:** selected by validation AUROC (scoring the positive-class output `out[:, 1]`), not loss.
+-- **OOD embedding:** not the 2-d logit but the 512-d penultimate vector, the output of global average pooling just before the final linear layer (`features(x)` runs the backbone through `avgpool` and flattens).
+-
+-The 2-dimensional head is too low-rank for the covariance-based Mahalanobis metrics; the penultimate space is full-rank and is where the discriminative structure sits. This matches the forward hook the upstream evaluation code used.
++- **OOD embedding:** not the 2-d logit but the 512-d penultimate vector.
+ 
+ ---
+ 
+@@ -73,263 +62,91 @@ The 2-dimensional head is too low-rank for the covariance-based Mahalanobis metr
+ 
+ *File: `feature_methods/src/ood_supervised_ctr.py`. Self-contained.*
+ 
+-A supervised contrastive encoder on a CIFAR-style ResNet-18: a 3×3 stride-1 stem with no max-pooling, used instead of the torchvision stem whose 7×7 stride-2 convolution and max-pool would over-downsample a 28×28 image. The encoder produces a 512-d embedding; an MLP projection head maps it to a 128-d vector that is L2-normalised onto the unit hypersphere.
++A supervised contrastive encoder on a CIFAR-style ResNet-18: a 3×3 stride-1 stem with no max-pooling. The encoder produces a 512-d embedding; an MLP projection head maps it to a 128-d vector L2-normalised onto the unit hypersphere.
+ 
+-Each image is presented as two augmented crops (`RandomResizedCrop(28)` + `RandomRotation(10)`) via a `TwoCropTransform` (wired in `datasets/__init__.py` for `method=="supervised-ctr"`), so a batch of `B` images yields `2B` views. In one step both views are stacked, encoded, projected, regrouped into the `[B, 2, 128]` shape the loss expects, and scored:
++Each image is presented as two augmented crops (`RandomResizedCrop(28)` + `RandomRotation(10)`) via a `TwoCropTransform` (wired in `datasets/__init__.py` for `method=="supervised-ctr"`), so a batch of `B` images yields `2B` views. Both views are encoded and projected, regrouped into the `[B, 2, 128]` shape the loss expects, and scored by the supervised contrastive loss (anchor view `i`, positive set `P(i)` of other views sharing `i`'s label, all-other-views set `A(i)`, temperature `τ = 0.07`):
+ 
+-```python
+-images = torch.cat([images[0], images[1]], dim=0)            # [2B, C, H, W]
+-feats  = self.model(images)                                  # [2B, 128], L2-normalized
+-f1, f2 = torch.split(feats, [bsz, bsz], dim=0)
+-feats  = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1) # [B, 2, 128]
+-loss   = self.loss_function(feats, labels)                   # SupConLoss
+ ```
+-
+-The supervised contrastive loss, for an anchor view `i` with positive set `P(i)` (other views sharing `i`'s label) and the set `A(i)` of all other views, with temperature `τ = 0.07`:
+-
+-```
+-L_SupCon = Σ_i  (−1/|P(i)|) Σ_{p∈P(i)} log [ exp(⟨z_i, z_p⟩/τ) / Σ_{a∈A(i)} exp(⟨z_i, z_a⟩/τ) ]
++L_SupCon = Σ_i (−1/|P(i)|) Σ_{p∈P(i)} log [ exp(⟨z_i, z_p⟩/τ) / Σ_{a∈A(i)} exp(⟨z_i, z_a⟩/τ) ]
+ ```
+ 
+-This pulls same-class views together and pushes different-class views apart on the sphere. (For stability the implementation subtracts a per-row maximum from the logits and masks self-comparisons; with neither labels nor a mask it reduces to the unsupervised SimCLR objective.)
++This pulls same-class views together and pushes different-class views apart on the sphere.
+ 
+ - **Best checkpoint:** lowest validation loss.
+ - **OOD embedding:** the L2-normalised 512-d encoder output (the input to the projection head), not the 128-d projection, which is used only for the loss and discarded after training.
+ 
+-Two departures from the public SupCon repo this descends from: (1) the CIFAR-style ResNet stem above, and (2) the canonical multi-view `SupConLoss` (Khosla et al.), which expects features shaped `[batch, n_views, dim]`, rather than the public repo's flat objective. A reference copy of `SupConLoss`/`TwoCropTransform` lives in `supcon_loss.py`; the extractor also embeds its own identical copy inline so it has no import-time dependency on the bridge package.
+-
+-> **Batch-size sensitivity.** Because `L_SupCon` depends on having same-class positives within each batch, the contrastive encoder is the extractor whose representation is most sensitive to batch size; the autoencoder and CNN objectives are largely insensitive. The results bear this out: the contrastive encoder collapses at batch size 16. See [Results & Limitations](./Results-and-Limitations.md).
+-
+ ---
+ 
+ ## Feature extraction (stage 3)
+ 
+-`get_features.py` orchestrates extraction:
+-
+-1. Loads the data with `method="none"`, suppressing the two-crop transform so each image is seen once (the contrastive augmentation is for training only).
+-2. Materialises the three splits as plain matrices via `matrixify` and saves them as `data_splits.npz` (`Xtr/ytr`, `Xvl/yvl`, `Xtt/ytt`), so evaluation reads identical data.
+-3. For each checkpoint, loads the model in `testing` mode, runs the matching `FeatureSpace` over the splits, and writes the train/test feature matrices together with the checkpoint path, the seed of the downstream provenance check:
+-
+-```python
+-cnn_eval = load_eval(cnn_model, train_set, val_set, test_set)
+-np.savez(os.path.join(numpy_dir, "cnn_features"),
+-    cnn_Ftr=cnn_eval.train_features,
+-    cnn_Ftt=cnn_eval.test_features,
+-    cnn_pth=opt.cnn_path)        # provenance: which checkpoint produced these
+-```
+-
+-After this stage the per-run `numpy_files/` folder holds one `data_splits.npz` and three `<method>_features.npz`, and training is no longer needed downstream.
+-
+----
+-
+-## The reference distribution
+-
+-Given a trained extractor, the in-distribution training features `F_tr = {f_θ(x) : x ∈ ID train}` define a reference distribution with centroid
+-
+-```
+-µ = (1/N) Σ_i f_i ,    f_i = f_θ(x_i)
+-```
+-
+-`ood_detection.py` restricts the training features to the in-distribution class before scoring (`Ftr_in = Ftr[ytr == 1]`). Each test image then gets a scalar similarity or distance to this reference, and the decision rule decides whether that score is anomalous.
++`get_features.py` loads the data with `method="none"` (suppressing the two-crop transform, which is for training only), materialises the three splits as plain matrices via `matrixify` into `data_splits.npz` (`Xtr/ytr`, `Xvl/yvl`, `Xtt/ytt`) so evaluation reads identical data, then for each checkpoint loads the model in `testing` mode, runs the matching `FeatureSpace`, and writes `<method>_features.npz` with the train/test feature matrices and the originating checkpoint path (for the downstream provenance check). After this stage the per-run `numpy_files/` folder holds one `data_splits.npz` and three `<method>_features.npz`, and training is no longer needed.
+ 
+ ---
+ 
+-## Scoring functions
++## The reference distribution and scoring
+ 
+-### Cosine similarity (`cosine`)
+-
+-```
+-s_cos(x) = ⟨f_θ(x), µ⟩ / (‖f_θ(x)‖ ‖µ‖) = cos∠(f_θ(x), µ)
+-```
++The in-distribution training features define a reference with centroid `µ = (1/N) Σ f_i`. `ood_detection.py` restricts the training features to the in-distribution class first (`Ftr_in = Ftr[ytr == 1]`), then gives each test image a scalar similarity or distance to this reference, which the decision rule judges anomalous or not.
+ 
+-clipped to `[0, 1]` (a small ε is added for numerical safety). High cosine means alignment with the in-distribution centroid; OOD samples show low similarity. In code, `compute_cosine_similarity` computes the centroid, then `1 − clip(distance.cosine(feature + ε, centroid), 0, 1)` per test point.
+-
+-### Mahalanobis distance (`mahalanobis`, `mahalanobis-solve`, `mahalanobis-pinv`)
+-
+-The Mahalanobis distance accounts for the feature covariance `Σ`, measuring displacement in units of standard deviation along each correlated direction:
+-
+-```
+-d_M(x) = sqrt( (f_θ(x) − µ)ᵀ Σ⁻¹ (f_θ(x) − µ) )
+-```
++Cosine similarity (`cosine`) is `cos∠(f_θ(x), µ)`, clipped to `[0, 1]` (a small ε for numerical safety). High cosine means alignment with the in-distribution centroid; OOD samples show low similarity.
+ 
+-A large `d_M` means the point is far from the in-distribution manifold (OOD). The hard part is `Σ⁻¹`: the empirical feature covariance is severely ill-conditioned (condition number `κ ≈ 10¹⁴`). The pipeline implements three numerically distinct routes to this distance and compares them directly.
++Mahalanobis distance (`mahalanobis`, `-solve`, `-pinv`) accounts for the feature covariance `Σ`: `d_M(x) = sqrt( (f_θ(x) − µ)ᵀ Σ⁻¹ (f_θ(x) − µ) )`. A large `d_M` means the point is far from the in-distribution manifold. The hard part is `Σ⁻¹`: the empirical feature covariance is severely ill-conditioned (κ ≈ 10¹⁴). The pipeline implements three numerically distinct routes and compares them directly.
+ 
+ ---
+ 
+ ## The Mahalanobis numerical core
+ 
+-This is the focus of recent work, and the differences are numerical rather than cosmetic. All three variants share `d²(x) = (x − µ)ᵀ Σ⁻¹ (x − µ)` but differ in how they estimate and apply the inverse covariance. Each caches its fit keyed by the identity and a content fingerprint of the training array, so the expensive fit happens once and the bootstrap reuses it. Each prints a one-time diagnostic report on first use.
++All three variants share `d²(x) = (x − µ)ᵀ Σ⁻¹ (x − µ)` but differ in how they estimate and apply the inverse covariance. Each caches its fit (keyed by the training array's identity and a content fingerprint) so the expensive fit happens once and the bootstrap reuses it, and prints a one-time diagnostic on first use.
+ 
+-### Why the raw estimator is fragile
++For 512-d features from a limited sample, the raw covariance has low effective rank, with tiny or numerically negative eigenvalues. Where eigenvalues are near zero, the pseudo-inverse amplifies any test-point component along those directions by `1/λ`.
+ 
+-The original code estimated `Σ` by the raw sample covariance and inverted it with a pseudo-inverse (kept as `OLD_compute_mahalanobis_distance`):
++### (a) `mahalanobis` — Ledoit–Wolf shrinkage (production)
+ 
+-```python
+-centroid = np.mean(tr, axis=0)
+-inv_cov  = pinv(np.cov(tr, rowvar=False))   # raw covariance, pseudo-inverse
+-```
+-
+-For 512-dimensional features from a limited sample, the raw covariance has low effective rank, with tiny or numerically negative eigenvalues. The diagnostics print the condition number and the participation-ratio effective rank:
+-
+-```
+-κ = λ_max / λ_min            r_eff = (Σ_i λ_i)² / (Σ_i λ_i²)
+-```
+-
+-When eigenvalues are near zero, the pseudo-inverse amplifies any test-point component along those directions by `1/λ`, and that amplified component is squared before entering the distance. The result is unstable distances, and round-off can push the quadratic form slightly negative, which under this module's strict warning policy (below) would crash the whole evaluation.
+-
+-### (a) `mahalanobis`: Ledoit–Wolf shrinkage (the production metric)
+-
+-The fix is to shrink the covariance toward a scaled identity, positive definite by construction:
++Shrink the covariance toward a scaled identity, positive definite by construction:
+ 
+ ```
+ Σ_LW = (1 − α)·Ŝ + α·(tr(Ŝ)/d)·I ,    α ∈ [0,1] estimated automatically
+ ```
+ 
+-The additive term floors every eigenvalue, collapsing the condition number and bounding the amplification, while leaving the dominant directions essentially unchanged (`α` is chosen analytically to minimise expected squared error). The production metric fits `LedoitWolf` once (cached), uses its precision matrix, and clamps the quadratic form at zero defensively:
+-
+-```python
+-lw = LedoitWolf().fit(tr)                       # alpha = lw.shrinkage_
+-centroid, precision = lw.location_, lw.get_precision()
+-distances.append(np.sqrt(max(diff @ precision @ diff.T, 0.0)))
+-```
++The additive term floors every eigenvalue, collapsing the condition number and bounding the amplification while leaving the dominant directions essentially unchanged (`α` minimises expected squared error).
+ 
+-On first use it prints a before/after diagnostic: the raw matrix's eigenvalue spread, effective rank, and pinv cutoff/amplification against the shrunk matrix's shrinkage `α` and eigenvalue floor.
++### (b) `mahalanobis-solve` — direct solve (no explicit inverse)
+ 
+-### (b) `mahalanobis-solve`: direct solve (no explicit inverse)
+-
+-`mahalanobis-solve` computes the same distance under the same Ledoit–Wolf covariance but never forms an inverse. It Cholesky-factors `Σ_LW = L Lᵀ` once, then solves a triangular system per test point:
+-
+-```python
+-L    = cholesky(lw.covariance_, lower=True)         # Sigma = L L^T
+-diff = tt - centroid                                # (n_test, d)
+-y    = solve_triangular(L, diff.T, lower=True)      # solve L y = diff^T
+-d    = np.sqrt(np.einsum("ij,ij->j", y, y))         # d^2 = ||y||^2
+-```
+-
+-The identity that makes this correct:
++Same Ledoit–Wolf covariance, but never forms an inverse: Cholesky-factor `Σ_LW = L Lᵀ` once, then solve a triangular system per test point. With `y = L⁻¹(x − µ)`,
+ 
+ ```
+-‖y‖² = ‖L⁻¹(x − µ)‖² = (x − µ)ᵀ L⁻ᵀ L⁻¹ (x − µ) = (x − µ)ᵀ Σ_LW⁻¹ (x − µ) = d²(x)
++‖y‖² = (x − µ)ᵀ L⁻ᵀ L⁻¹ (x − µ) = (x − µ)ᵀ Σ_LW⁻¹ (x − µ) = d²(x)
+ ```
+ 
+-Two things follow automatically. First, `d²` is a sum of squares, non-negative by construction (no clamp needed). Second, the triangular solve is vectorised over all test points at once, faster than a per-row precision multiply. The point the comments stress: "solving" cannot rescue a singular system, since a least-squares solve of a singular covariance *is* the pseudo-inverse operation, with the same amplification. The benefit comes from solving the *shrunk, well-conditioned* system, not from solving as such.
++so `d²` is a sum of squares (non-negative, no clamp needed) and the triangular solve vectorises over all test points (faster than a per-row precision multiply). "Solving" does not by itself rescue a singular system: a least-squares solve of a singular covariance *is* the pseudo-inverse, with the same amplification.
+ 
+-### (c) `mahalanobis-pinv`: the baseline
++### (c) `mahalanobis-pinv` — the baseline
+ 
+-`mahalanobis-pinv` keeps the original raw-covariance, pseudo-inverse estimator as a deliberate comparison baseline, with three controlled deviations so the comparison isolates the estimator rather than incidental differences:
++Keeps the raw-covariance pseudo-inverse estimator as a deliberate comparison, with three controlled deviations so the comparison isolates the estimator: the fit is cached; features are promoted to float64 (matching the LW paths); and the quadratic form is clamped at zero before the square root (pinv round-off can go slightly negative, which the fail-loud policy would otherwise turn into a crash). Clamp events are reported once.
+ 
+-1. the fit is cached (pinv is deterministic, so the numbers are identical with far less work inside the bootstrap);
+-2. features are promoted to float64 to match the Ledoit–Wolf paths (isolating the estimator, not arithmetic precision);
+-3. the quadratic form is clamped at zero before the square root. Pinv round-off can go slightly negative, and this module promotes `RuntimeWarning` to a hard error, so without the clamp one bad sample kills the eval. Clamp events are reported once, since they are evidence of the instability the shrinkage paths avoid.
+ 
+-### Correctness relationships
+ 
+-- Routes (a) and (b) use the same `Σ_LW` and must agree to roughly `10⁻⁹` relative error, a correctness check since they differ only in procedure. (On the trained features they come out bit-identical; see [Results & Limitations](./Results-and-Limitations.md).) A larger gap signals a bug.
+-- Route (c), solving the raw singular system, is mathematically equivalent to the pseudo-inverse, so it is the shrinkage, not the choice of solver, that resolves the conditioning. Evaluating all three side by side exposes the estimator's effect at the level of detection performance.
++Routes (a) and (b) use the same `Σ_LW`. Route (c) solves the raw singular system, so it is mathematically the pseudo-inverse; evaluating all three side by side exposes the estimator's effect on detection performance.
+ 
+ ---
+ 
+ ## Control limits and the decision rule
+ 
+-The reference distances are summarised by a Shewhart control chart. From the training scores the pipeline computes the mean `s̄`, the standard deviation `σ`, and three-sigma control limits:
+-
+-```
+-UCL = s̄ + 3σ ,    LCL = s̄ − 3σ
+-```
+-
+-A test point is flagged as OOD by a one-sided "Rule 1" whose side depends on the metric:
+-
+-```python
+-if metric_name == "cosine":
+-    if data[i] < (mean - 3*std):  violations["Rule 1"].append(i)   # lower tail
+-elif metric_name.startswith("mahalanobis"):
+-    if data[i] > (mean + 3*std):  violations["Rule 1"].append(i)   # upper tail
+-```
+-
+-Only the tail corresponding to dissimilarity from the reference counts: low cosine similarity is anomalous, high Mahalanobis distance is anomalous. The opposite tail (more in-distribution-typical than average) is not. For the Mahalanobis score, which is non-negative and right-skewed, the lower limit is not meaningful anyway, a further reason the test is one-sided.
++The training scores give a mean `s̄`, standard deviation `σ`, and three-sigma control limits `UCL = s̄ + 3σ`, `LCL = s̄ − 3σ`. A test point is flagged OOD by a one-sided "Rule 1" whose side depends on the metric: low cosine similarity is anomalous (`< s̄ − 3σ`), high Mahalanobis distance is anomalous (`> s̄ + 3σ`).
+ 
+ ---
+ 
+ ## The bootstrap (the master-table numbers)
+ 
+-Detection quality is estimated by bootstrapping over the test set. `ood_statistics` selects the metric's scoring function, computes the in-distribution centre and spread once, then resamples the test set `n` times. Each resample draws 100 test points without replacement under a fixed RNG, scores them, applies Rule 1, and tallies a 2×2 confusion matrix:
++`ood_statistics` selects the metric's scoring function, computes the in-distribution centre and spread once, then resamples the test set `n` times. Each resample draws 100 test points without replacement under a fixed RNG (`random.seed(2022)`), scores them, applies Rule 1, and tallies a 2×2 confusion matrix, from which:
+ 
+-```python
+-random.seed(2022)   # fixed bootstrap RNG (Python random, not numpy)
+-for i in range(n):
+-    sample = random.sample(range(tt_features.shape[0]), k=100)   # no replacement, k=100
+-    tt_subset = tt_features[sample, :]
+-    tt_subset_distances = fxn(tr_features, tt_subset)            # score the subset
+-    violations = apply_spc_rules(tt_subset_distances, train_mean, train_std, metric)
+-    # ... build confusion matrix, append accuracy / sensitivity / specificity ...
+ ```
+-
+-From each confusion matrix:
+-
+-```
+-Accuracy    = (tp + tn) / (tp + tn + fp + fn)
+-Sensitivity = tp / (tp + fn)      # OOD recall
+-Specificity = tn / (tn + fp)      # ID retention
++Accuracy = (tp+tn)/(tp+tn+fp+fn)   Sensitivity = tp/(tp+fn)   Specificity = tn/(tn+fp)
+ ```
+ 
+-Each quantity is reported as the mean across the `n` draws, together with the band `[mean − std, mean + std]`. That band is one standard deviation (≈ 68% under a normal approximation), not a 95% interval, so the "LCL/UCL" columns in the table are `x̄ ± s`, not percentile confidence bounds. Because the RNG is pinned and the resampling is identical across metrics, the bootstrap is deterministic given the features and metrics are compared on identical resamples (a paired comparison). All variation in detection performance across seeds and batch sizes therefore enters only through the trained extractor `f_θ`; the scoring stage adds no extra stochasticity.
+-
+-> **Label convention at the scoring step.** Throughout the dataset code `y = 1` is in-distribution and `y = 0` is OOD, but `ood_detection.py` passes `1 - ytt` into `ood_statistics`, inverting the labels so a `1` marks an OOD image for the confusion matrix. The training features are still selected with the original convention (`Ftr[ytr == 1]` = in-distribution).
+-
+-`specificity` and `sensitivity` are computed inside `try/except RuntimeWarning`: when a confusion-matrix denominator is zero, the numpy divide raises (this module promotes runtime warnings to errors; see below) and the handler records `NaN`, later aggregated with `nanmean`/`nanstd`.
++Each quantity is reported as the mean across the `n` draws with the band `[mean − std, mean + std]` — one standard deviation (≈ 68%), not a 95% interval. Because the RNG is pinned and the resampling is identical across metrics, the bootstrap is deterministic and metrics are compared on identical resamples (a paired comparison); all variation across seeds and batch sizes therefore enters only through the trained extractor `f_θ`.
+ 
+ ---
+ 
+ ## Outputs of stage 4a
+ 
+-Each `ood_detection.py` invocation:
+-
+-1. Appends or replaces its method's row in the per-run `results/bsz<B>_<metric>_seed<S>/results.csv` (one row per method; re-running a method replaces its stale row).
+-2. Dumps the raw bootstrap arrays to `<metric>_<method>_bootstrap.npz`.
+-3. Saves a full-test control-chart figure to `figures/bsz<B>_<metric>_seed<S>/<metric>_<method>_viz.png` via `ood_visualization`, which plots the per-image score, the centre line and control band, marks auto-detected and true OOD points, and prints the accuracy/specificity/sensitivity.
+-
+-`merge_results.py` then aggregates all per-run `results.csv` into the master `ood_bootstrap.csv`; see [Results & Limitations](./Results-and-Limitations.md).
+-
+----
+-
+-## The provenance guard
+-
+-A single invocation loads this run's data splits and the requested method's features, then checks that the checkpoint path stored in the feature file carries this run's key:
+-
+-```python
+-expected = run_name(options["batch_size"], options["seed"])   # bsz<B>_seed<S>
+-if expected not in ckpt_pth:
+-    if re.search(r"bsz\d+_seed\d+", ckpt_pth):
+-        raise RuntimeError(f"Feature provenance mismatch: ... ({ckpt_pth})")
+-    warnings.warn("Feature provenance unverified (legacy checkpoint path): ...")
+-```
+-
+-A path carrying a different `bsz.._seed..` key is a true mislabelling and hard-fails; a path carrying no key (legacy or paper-pretrained) only warns. This catches the failure mode where features cached for one run are accidentally scored under another run's key.
+-
+----
+-
+-## Fail-loud policy
+-
+-`ood_detection.py` promotes runtime warnings to errors at import:
+-
+-```python
+-warnings.filterwarnings("error", category=RuntimeWarning)
+-```
+-
+-This is why the numerical design matters: a silently-`NaN` distance or a divide-by-zero is no longer a buried warning but a hard stop. It also explains the explicit clamps in the Mahalanobis variants and the `try/except RuntimeWarning` guards around the confusion-matrix ratios, the points where benign zero-denominators are turned into `NaN` *on purpose* rather than allowed to crash the run.
+-
+----
+-
+-## Verification harness (`verify_maha_solve.py`)
+-
+-A standalone harness exercises the production solve code on synthetic features engineered into the same ill-conditioned regime (low effective rank, float32), in two phases.
+-
+-**A. Standalone (always runs).** Using exact copies of the production solve pieces, on synthetic data, it checks four things without the repo: a **hypothesis probe** (whether a Cholesky of the *raw* covariance even runs, plus a demonstration that a least-squares solve of the raw system equals the pseudo-inverse), **equivalence** (the Ledoit–Wolf solve and precision paths agree to ~`10⁻⁹`), **non-negativity** (the solve path's `d²` is a sum of squares, always ≥ 0), and **timing** (vectorised triangular solve vs the per-row precision loop).
+-
+-**B. Acceptance (runs only inside the repo venv, when `import ood_detection` succeeds).** Cross-checks the module's own `compute_mahalanobis_distance`, `compute_mahalanobis_distance_solve`, and (if present) `compute_mahalanobis_distance_pinv` against each other and a raw-pinv reference.
+-
+-Run it from the repo root:
+-
+-```bash
+-python verify_maha_solve.py
+-```
++Each `ood_detection.py` invocation appends or replaces its method's row in the per-run `results/bsz<B>_<metric>_seed<S>/results.csv` (one row per method), dumps the raw bootstrap arrays to `<metric>_<method>_bootstrap.npz`, and saves a full-test control-chart figure to `figures/.../<metric>_<method>_viz.png`. `merge_results.py` then aggregates all per-run `results.csv` into the master `ood_bootstrap.csv`; see [Results & Limitations](./Results-and-Limitations.md).
+\ No newline at end of file
+diff --git a/Documentation/Installation.md b/Documentation/Installation.md
+index 64a4276..85a5ea1 100644
+--- a/Documentation/Installation.md
++++ b/Documentation/Installation.md
+@@ -1,87 +1,58 @@
+ # Installation
+ 
+-DataMonitor runs inside a Python virtual environment that the setup stage of `datamonitor.sh` builds, so you normally configure `.env` and let the pipeline create it rather than installing anything by hand. This guide covers the prerequisites, what setup does, every configuration knob, and the known script-vs-`.env` inconsistencies.
++DataMonitor runs inside a Python virtual environment that the setup stage of `datamonitor.sh` builds, so you normally configure `.env` and let the pipeline create it rather than installing anything by hand. This guide covers the prerequisites, what setup does, the configuration knobs, and the known script-vs-`.env` inconsistencies.
+ 
+ ---
+ 
+ ## Prerequisites
+ 
+-- **Python 3.11.** The committed lockfile (`requirements.lock.txt`) pins `torch 2.6.0+cu124`, `numpy 2.x`, and related wheels resolved for Python 3.11. Setup checks the interpreter version and warns (does not hard-fail) if it is not 3.11.
+-- **A C toolchain and standard build utilities** for any packages that compile.
+-- **(Optional) An NVIDIA GPU with CUDA 12.4.** The lockfile installs the `+cu124` CUDA wheels for `torch`/`torchvision` (resolved for an A100, `sm_80`). The pipeline runs on CPU if no GPU is visible; training is just much slower.
+-- **`flock`** (from `util-linux`), which serialises the setup stage across concurrent pipelines. It is present on essentially all Linux distributions.
++- **Python 3.11.** The committed lockfile (`requirements.lock.txt`) pins `torch 2.6.0+cu124`, `numpy 2.x`, and related wheels resolved for 3.11. Setup checks the interpreter and warns (does not hard-fail) if it is not 3.11.
++- **(Optional) an NVIDIA GPU with CUDA 12.4.** The lockfile installs the `+cu124` wheels for `torch`/`torchvision`.
+ 
+-> **`requirements.txt` vs `requirements.lock.txt`.** The repo ships both. `requirements.txt` is the *original upstream* pin set (Python ≤3.10, `numpy 1.19`, `torch 1.10`) kept for historical reference; the pipeline does **not** install from it. The environment actually built comes from `requirements.lock.txt`, the modern (Python 3.11) lockfile. Install from the lockfile.
++`requirements.txt` is the *original upstream* pin set (Python ≤3.10, `numpy 1.19`, `torch 1.10`), kept for reference only; the pipeline does **not** install from it. The environment is built from `requirements.lock.txt`.
+ 
+ ---
+ 
+ ## The automated setup stage
+ 
+-Running `./datamonitor.sh` with `RUN_SETUP=1` (the default) performs these steps in order:
++`./datamonitor.sh` with `RUN_SETUP=1` (the default) runs these steps in order:
+ 
+-1. **Acquire the setup lock.** `exec 9>"$REPO_DIR/.setup.lock"; flock -x 9` serialises setup so that when several pipelines start at once (under `sweep.sh`), the first does the work and the rest block briefly, then fast-skip the idempotent body. The lock releases automatically if the holder crashes.
+-2. **Validate the interpreter.** Confirms `PYTHON_BIN` exists and is Python 3.11 (warns otherwise).
+-3. **Create and populate the virtual environment.** Prefers `python -m venv`; falls back to a `virtualenv.pyz` if `VIRTUALENV_PYZ` is set (useful on HPC nodes whose Python lacks `ensurepip`). It upgrades `pip`/`setuptools`/`wheel` and installs from the committed lockfile:
+-   ```bash
+-   pip install -r requirements.lock.txt --quiet
+-   pip install --quiet rich   # used only by merge_results.py for the terminal table
+-   ```
+-   Installing from a committed lockfile rather than resolving on the fly means every machine gets byte-identical versions.
+-4. **Verify the committed bridge modules exist.** Earlier versions generated several "shim" modules at runtime; they are now committed source. Setup *verifies* (does not regenerate) that the six bridge modules are present:
+-   - `feature_methods/__init__.py`
+-   - `feature_methods/supcon_loss.py`
+-   - `feature_methods/src/base.py`
+-   - `feature_methods/src/conv_autoencoder.py`
+-   - `feature_methods/src/ood_supervised_cnn.py`
+-   - `feature_methods/src/ood_supervised_ctr.py`
+-5. **Verify the committed source edits.** Two edits formerly patched at runtime are now committed and checked by `grep` guards: `datasets/__init__.py` carries the contrastive two-crop augmentation (`grep -q "RandomResizedCrop"`), and `train.py` carries the deterministic-seeding helper (`grep -q "_seed_everything"`).
+-6. **Write `cfg.json` atomically.** It is written to a PID-unique temp path and then `mv`-renamed into place, so a concurrent reader never sees a half-written file:
++1. **Acquire the setup lock.** `flock -x` on `$REPO_DIR/.setup.lock` serialises setup, so when several pipelines start at once (under `sweep.sh`) the first does the work and the rest block briefly then fast-skip the idempotent body. The lock releases automatically if the holder crashes.
++2. **Validate the interpreter** (`PYTHON_BIN` exists, is 3.11).
++3. **Create and populate the venv.** Prefers `python -m venv`; falls back to a `virtualenv.pyz` if `VIRTUALENV_PYZ` is set (for HPC nodes lacking `ensurepip`). Upgrades `pip`/`setuptools`/`wheel`, then `pip install -r requirements.lock.txt` plus `rich` (used only by `merge_results.py`). Installing from a committed lockfile means every machine gets identical versions.
++4. **Verify the committed bridge modules exist.** Earlier versions generated several shim modules at runtime; they are committed source now, and setup *verifies* (does not regenerate) the six bridge modules under `feature_methods/`.
++5. **Verify the committed source edits** via `grep` guards: `datasets/__init__.py` carries the contrastive two-crop augmentation (`RandomResizedCrop`), and `train.py` carries the deterministic-seeding helper (`_seed_everything`).
++6. **Write `cfg.json` atomically** (PID-unique temp path, then `mv`), so a concurrent reader never sees a half-written file:
+    ```json
+-   {
+-       "data_dir":   "<DATA_DIR>",
+-       "table_path": "<RESULTS_DIR>/ood_bootstrap.csv"
+-   }
++   { "data_dir": "<DATA_DIR>", "table_path": "<RESULTS_DIR>/ood_bootstrap.csv" }
+    ```
+-   All three Python entrypoints read these two keys: `data_dir` says where the MedMNIST `.npz` files live, and `table_path` says where `merge_results.py` writes the master table.
++   All three Python entrypoints read these two keys: where the MedMNIST `.npz` files live, and where `merge_results.py` writes the master table.
+ 
+-Running a later stage with `RUN_SETUP=0` still activates the existing venv (if present) before proceeding.
++Running a later stage with `RUN_SETUP=0` still activates the existing venv before proceeding.
+ 
+ ---
+ 
+ ## The dataset
+ 
+-The dataset is the MedMNIST AbdominalCT family: `organamnist` (axial), `organcmnist` (coronal), and `organsmnist` (sagittal). The dataset class downloads the `.npz` files automatically on first use (`download=True`) into `DATA_DIR`, so you need network access on the first run and enough disk for the three files, but no manual fetching.
++The dataset is the MedMNIST AbdominalCT family: `organamnist` (axial), `organcmnist` (coronal), `organsmnist` (sagittal). The dataset class downloads the `.npz` files automatically on first use into `DATA_DIR`, so the first run needs network access and disk for three files, but no manual fetching.
+ 
+ ---
+ 
+ ## Configuration: the `.env` file
+ 
+-`datamonitor.sh` auto-loads `.env` from the repository root before applying its own defaults:
+-
+-```bash
+-set -a
+-source "${REPO_DIR}/.env"
+-set +a
+-```
+-
+-`set -a` exports every assignment, so `.env` is the canonical per-machine configuration. The full template is documented inline in `.env`; the most important knobs are below.
++`datamonitor.sh` auto-loads `.env` from the repo root under `set -a` (which exports every assignment) before applying its own defaults. The full template is documented inline in `.env`; the main knobs:
+ 
+ ### Stage toggles
+ 
+-| Variable | Default | Meaning |
+-| --- | --- | --- |
+-| `RUN_SETUP` | `1` | Create venv, install deps, verify shims, write `cfg.json`. |
+-| `RUN_TRAIN` | `1` | Train all three extractors (slow). Skips a method whose checkpoint exists unless `FORCE_TRAIN=1`. |
+-| `RUN_EXTRACT` | `1` | Dump features from the three checkpoints. |
+-| `RUN_EVAL` | `1` | Bootstrap detection table + CUSUM drift figure. |
++`1` = run, `0` = skip. `RUN_SETUP`, `RUN_TRAIN`, `RUN_EXTRACT`, and `RUN_EVAL` are all `1` by default; `RUN_TRAIN` skips a method whose checkpoint exists unless `FORCE_TRAIN=1`.
+ 
+ ### Paths
+ 
+ | Variable | Default | Meaning |
+ | --- | --- | --- |
+ | `REPO_DIR` | script directory | Where the repo lives. |
+-| `VENV_DIR` | `$REPO_DIR/.venv-py311`* | Virtual-environment path. |
+-| `PYTHON_BIN` | `python3`* | Interpreter used to create the venv. |
++| `VENV_DIR` | `$REPO_DIR/.venv-py311` | Virtual-environment path. |
++| `PYTHON_BIN` | `python3` | Interpreter used to create the venv. |
+ | `DATA_DIR` | `data` | MedMNIST `.npz` location. |
+ | `MODEL_SAVES_DIR` | `model_saves` | Trained `.pt` checkpoints. |
+ | `RESULTS_DIR` | `results` | Bootstrap CSV + per-run results. |
+@@ -95,65 +66,23 @@ set +a
+ | `EPOCHS` | `100` | Training epochs (paper setting). Drop to ~5 for a smoke test. |
+ | `BATCH_SIZE` | `128` | Batch size (also names the per-run output folders). |
+ | `LEARNING_RATE` | `0.001` | Optimiser learning rate (fixed across batch sizes; see [Results & Limitations](./Results-and-Limitations.md)). |
+-| `DM_SEED` | `1001` / `2008`* | Random seed (also names the per-run output folders). |
++| `DM_SEED` | `2008` | Random seed (also names the per-run output folders). |
+ | `POSITIVE_DATASET` | `organamnist` | Which CT view is in-distribution. |
+ | `FORCE_TRAIN` | `0` | Retrain even if a checkpoint exists. |
+-| `DM_NUM_WORKERS` | `0` / `6`* | DataLoader workers per training pipeline. |
+-| `OMP_NUM_THREADS` | (unset) / `4`* | Cap each pipeline's BLAS threads (matters under `sweep.sh`). |
+-
+-\* The script's internal default differs from the shipped `.env` value; see Known configuration inconsistencies below.
++| `DM_NUM_WORKERS` | `6` | DataLoader workers per training pipeline. |
++| `OMP_NUM_THREADS` | `4` | Cap each pipeline's BLAS threads (matters under `sweep.sh`). |
+ 
+ ### Evaluation and hardware
+ 
+ | Variable | Default | Meaning |
+ | --- | --- | --- |
+-| `BOOTSTRAP_N` | `100` / `1000`* | Bootstrap resamples for the detection table. |
+-| `USE_GPUS` | empty (= all) / `0`* | Comma-separated CUDA device IDs → `CUDA_VISIBLE_DEVICES`. |
+-| `EVAL_METRICS` | `cosine mahalanobis mahalanobis-solve mahalanobis-pinv` | Space-separated metrics to evaluate in stage 4a. |
+-| `AUTOENCODER_CKPT`, `CNN_CKPT`, `CTR_CKPT` | auto-discovered | Explicit checkpoint paths (otherwise the newest matching `.pt` is used). |
+-
+-\* See Known configuration inconsistencies below.
++| `BOOTSTRAP_N` | `1000` | Bootstrap resamples for the detection table. |
++| `USE_GPUS` | `0` | Comma-separated CUDA device IDs → `CUDA_VISIBLE_DEVICES`. |
++| `EVAL_METRICS` | `cosine mahalanobis mahalanobis-solve mahalanobis-pinv` | Metrics to evaluate in stage 4a. |
++| `AUTOENCODER_CKPT`, `CNN_CKPT`, `CTR_CKPT` | auto-discovered | Explicit checkpoint paths (otherwise the newest matching `.pt`). |
+ 
+ ---
+ 
+-## The precedence wrinkle (read this before sweeping)
+-
+-`.env` mixes two assignment styles, which behave differently because the file is sourced under `set -a`:
+-
+-- **Soft / fallback assignments**, e.g. `DM_SEED="${DM_SEED:-2008}"`. If the variable is already set in the environment, `:-default` expands to the *existing* value, so a value the caller exported survives. This is why `sweep.sh` can set `DM_SEED`/`BATCH_SIZE` per pipeline and have them take effect.
+-- **Hard assignments**, e.g. `VENV_DIR=./venv-py311`, `PYTHON_BIN=python3`, `DATA_DIR=data`. These always overwrite the environment, so they are fixed per machine.
+-
+-This reconciles two statements that look contradictory. The driver's header says ".env values unconditionally override the environment", true for the **hard** lines; `sweep.sh` relies on per-run overrides, true for the **soft** lines it touches. Precedence is decided line by line. If you intend to override a setting per run (via `sweep.sh` or `VAR=... ./datamonitor.sh`), make sure it is written in soft `${VAR:-default}` form in `.env`.
+-
+----
+-
+-## Known configuration inconsistencies
+-
+-Several defaults differ between `datamonitor.sh`'s internal fallbacks and the committed `.env`. As above, the shipped `.env` value is what a clean checkout uses; the script's default applies only if that `.env` line is removed.
+-
+-| Setting | `datamonitor.sh` default | Shipped `.env` value | Effective on clean checkout |
+-| --- | --- | --- | --- |
+-| `DM_SEED` | `1001` | `${DM_SEED:-2008}` (soft) | **2008** (unless caller exports `DM_SEED`) |
+-| `BOOTSTRAP_N` | `100` | `${BOOTSTRAP_N:-1000}` (soft) | **1000** (unless overridden) |
+-| `USE_GPUS` | empty (= all GPUs) | `${USE_GPUS:-0}` (soft) | **GPU 0** (unless overridden) |
+-| `DM_NUM_WORKERS` | `0` (in `train.py`) | `${DM_NUM_WORKERS:-6}` (soft) | **6** (unless overridden) |
+-
+-Notes:
+-
+-- The paper used `BOOTSTRAP_N = 100`; the shipped `.env` raises this to 1000 for tighter bootstrap bands. Larger values are slower but do not change the deterministic seed (`random.seed(2022)`), so results stay reproducible.
+-- The `.env` references a host-specific `VIRTUALENV_PYZ` path and some commented conda lines that are environment-specific; adjust or remove them for your machine.
+-
+-To make the script self-consistent without `.env`, set the relevant variables explicitly on the command line, or reconcile `.env` and the script defaults to a single source of truth.
+-
+----
+-
+-## Verifying the install
+-
+-After setup completes you can sanity-check the numerical core without training anything:
+-
+-```bash
+-# Standalone numerical-correctness harness (synthetic data, no checkpoints needed).
+-python verify_maha_solve.py
+-```
++## Configuration precedence
+ 
+-The "STANDALONE" phase always runs and exercises the production Mahalanobis-solve code on synthetic ill-conditioned features. The "ACCEPTANCE" phase also runs if `ood_detection` imports cleanly (you are in the venv at the repo root with `cfg.json` present). See [Feature Extraction & Detection → Verification harness](./Detection.md#verification-harness-verify_maha_solvepy).
++`.env` is sourced under `set -a`, so a soft assignment like `DM_SEED="${DM_SEED:-2008}"` keeps any value the caller already exported, which is how `sweep.sh` and `VAR=... ./datamonitor.sh` override settings per run; a plain assignment like `PYTHON_BIN=python3` always wins and is fixed per machine. Write anything you need to vary per run (notably `DM_SEED` and `BATCH_SIZE`, which `sweep.sh` sets) in the soft `${VAR:-default}` form.
+\ No newline at end of file
+diff --git a/Documentation/Results-and-Limitations.md b/Documentation/Results-and-Limitations.md
+deleted file mode 100644
+index 49ebf47..0000000
+--- a/Documentation/Results-and-Limitations.md
++++ /dev/null
+@@ -1,94 +0,0 @@
+-# Results & Limitations
+-
+-How to reproduce the paper's headline artifacts, the master detection table ("Table 3") and the seed × batch-size figure ("Figure 2"), how to read the numbers they produce, and the caveats that bound the conclusions.
+-
+----
+-
+-## Reproducing the master table
+-
+-The master table is built by `merge_results.py` from the per-run `results.csv` files that `ood_detection.py` writes.
+-
+-```bash
+-# After one or more pipelines have produced results/*/results.csv:
+-python merge_results.py            # rebuild the master CSV + print the table
+-python merge_results.py --quiet    # rebuild the CSV only, no terminal rendering
+-```
+-
+-`merge_results.py` **globs** every `results/*/results.csv`, concatenates, and sorts by `[Batch Size, Seed, Metric, Method]`; **writes** the master CSV atomically (PID-unique temp file, then `os.replace`), so it is safe to run while evaluations are in flight and concurrent merges never corrupt the file (last finisher wins; the path comes from `cfg.json`'s `table_path`, default `results/ood_bootstrap.csv`); and **renders** the table (rich-formatted if `rich` is installed, plain otherwise), grouped one section per `(batch size, seed)` run key, the best mean accuracy per section in bold green. Each cell shows `mean [LCL, UCL]`, where the bounds are `mean ± 1 std` of the bootstrap, not 95% intervals. The per-run `results.csv` files are the source of truth; the master is a derived view rebuildable at any time.
+-
+----
+-
+-## Reproducing the seed × batch-size figure
+-
+-`plot_seed_batch.py` renders the analysis figure (paper Figure 2) from the master CSV: one panel per feature method, mean detection accuracy versus batch size, with a ±1σ band across the random seeds.
+-
+-```bash
+-python plot_seed_batch.py                                  # defaults
+-python plot_seed_batch.py --csv results/ood_bootstrap.csv --out seed_batch_analysis.png
+-python plot_seed_batch.py --metric "Mean Sensitivity"      # any Mean* column
+-python plot_seed_batch.py --print-summary                  # also dump per-cell stats
+-```
+-
+-Two modelling choices follow from the pipeline's design: `mahalanobis-solve` is dropped (bit-identical to `mahalanobis`; see [Integrity of the numerical variants](#integrity-of-the-numerical-variants) below), and `mahalanobis-pinv` is kept and drawn dashed (it differs only in the covariance estimator, so it shows the estimator's effect on accuracy). The band in each panel is the seed-to-seed noise floor, so a batch-size trend is meaningful only where it rises above that band; a dotted line marks chance (0.5).
+-
+----
+-
+-## The experimental design
+-
+-The paper trains each extractor across a grid of four batch sizes `{16, 32, 128, 256}` and ten seeds `1001–1010`, yielding 40 run keys. Each key is evaluated under all four metrics for all three methods (12 rows per key, 480 rows total, a complete grid with no missing cells).
+-
+-The two factors play different roles. The **seed** is a *nuisance* factor: varying it with everything else fixed measures the pipeline's intrinsic run-to-run noise (the "noise floor"). The **batch size** is the *factor of interest*. The analysis is therefore sequential: first establish the seed-induced noise floor, then ask whether any batch-size difference exceeds it. Each cell is summarised as `mean ± σ_seed` over the ten seeds, an ±1σ (≈ 68%) summary from `n = 10` samples, not a 95% interval.
+-
+----
+-
+-## How to read the numbers
+-
+-### Integrity of the numerical variants
+-
+-Before interpreting performance, the paper confirms the relationship the metrics should satisfy. `mahalanobis` and `mahalanobis-solve` share the same Ledoit–Wolf covariance and differ only in procedure; on this data they are bit-identical across all 120 cells (max absolute difference in mean accuracy = 0), so they are one metric and `mahalanobis-solve` is dropped from the figures. `mahalanobis-pinv` (identical mathematics, raw pseudo-inverse instead of shrinkage) differs from the shrinkage path by at most 0.018 in mean accuracy (mean difference 0.003): the ill-conditioning is real but, on these trained features, immaterial to detection accuracy. It is kept (dashed) so the near-equivalence is visible rather than assumed.
+-
+-### The noise floor
+-
+-For the two methods that detect at all (CNN and contrastive), the typical seed-to-seed standard deviation of accuracy is about one percentage point (median `σ_seed` 0.010 for the CNN, 0.008 for the contrastive encoder). Re-running with a different seed moves accuracy by roughly ±0.01, the bar a batch-size difference must clear to count as real.
+-
+-The autoencoder is the exception: it sits at chance (≈ 0.51) for every metric and batch size, with a noise floor near zero (`σ_seed ≤ 0.004`). Its reconstruction-latent features do not separate the in-distribution from the off-axis views, so there is no signal for seed or batch size to perturb. It is reported for completeness but excluded from the effect analysis.
+-
+-### Batch-size effects
+-
+-The batch-size effect is genuine but lives entirely at the extremes of the range and is method-specific:
+-
+-- **Contrastive encoder: a small-batch collapse (as predicted by the loss).** From batch size 32 upward the contrastive encoder is flat and strong (cosine accuracy 0.927–0.932, `σ_seed ≤ 0.010`). At batch size 16, cosine accuracy drops to 0.876 and its noise floor explodes to `σ_seed = 0.091`, by far the largest variability in the study (per-seed accuracy ranges 0.684 to 0.955). The sensitivity/specificity decomposition localises the cause: at batch size 16, sensitivity (in-distribution recall, note the inverted-label convention) falls to 0.811 from ≈ 0.99 at larger batches, while specificity rises. The small batch provides too few positives for the contrastive loss to form a tight in-distribution manifold, so the score distribution smears. This is a small-batch failure, not a smooth trend.
+-- **CNN: a mild large-batch softening, partly an optimisation artifact.** Under Mahalanobis scoring, CNN accuracy declines monotonically with batch size (0.897 → 0.870 from 16 to 256, against a 0.010 noise floor, a real effect). Under cosine scoring, batch size 256 is *unstable* rather than simply lower (`σ_seed = 0.043`). With the learning rate fixed at 0.001 for every configuration, a larger batch means fewer optimiser updates per epoch, so part of this softening is plausibly undertraining rather than a property of batch size as such. The middle of the range (32–128) is stable for the CNN under every metric.
+-
+-### Metric ranking
+-
+-Across the working regime the ordering is cosine ≳ Mahalanobis ≈ Mahalanobis-pinv. Cosine is the strongest scorer on these features, and the covariance-estimator choice does not change the ranking.
+-
+-### Practical takeaway
+-
+-The seed effect is small and structureless (≈ ±0.01, no dependence on the seed's numeric value). The batch-size effect is real but confined to the endpoints and method-dependent: the contrastive encoder fails below batch size 32, the CNN softens above batch size 128 (entangled with the fixed learning rate), and the autoencoder detects at chance regardless. The defensible operating range is batch size 32–128, where every working method sits in a flat, low-variance band, with the contrastive encoder under cosine scoring the strongest configuration overall.
+-
+----
+-
+-## Study caveats
+-
+-Three limitations bound the conclusions above:
+-
+-1. **Small sample for the noise floor.** Every standard deviation is estimated from `n = 10` seeds. The noise-floor estimates are honest but not tight, and all bands are ±1σ (≈ 68%), not 95% intervals.
+-2. **Learning rate confounded with batch size.** The learning rate is fixed at 0.001 across all batch sizes, so batch size and the number of optimiser steps per epoch co-vary. The CNN's large-batch softening in particular is entangled with optimisation, and attributing it cleanly would need a learning-rate-scaled rerun at batch size 256.
+-3. **The contrastive collapse leans on one seed.** The batch-size-16 collapse is driven partly by a single poor seed (1006). The elevated variance is itself the finding, but re-extracting that run would confirm the collapse reproduces rather than reflecting a one-off training divergence.
+-
+-A scope note: the experiment uses a single in-distribution view (axial) against two off-axis views as OOD, on one dataset family (MedMNIST AbdominalCT). The autoencoder's chance-level performance is a finding about *these features on these views*, not a general statement about reconstruction-based OOD detection.
+-
+----
+-
+-## Code-level caveats
+-
+-- **Upstream modules are not reproduced here.** The base classes (`Model`, `FeatureSpace`), the dataset loader/class, and the two `SPC_Charts/` modules are invoked but originate upstream. They are documented at the interface level; their internals are out of scope.
+-- **The numerical fail-loud policy is strict by design.** `ood_detection.py` promotes every `RuntimeWarning` to a hard error at import. This is intentional (a silent `NaN` or divide-by-zero should stop the run, not hide in logs), but any new numerical code in that module must handle near-singular or zero-denominator cases explicitly, the way the existing clamps and `try/except RuntimeWarning` guards do. See [Detection → fail-loud policy](./Detection.md#fail-loud-policy).
+-- **Provenance is checked, not enforced at write time.** The guard hard-fails if a feature file's stored checkpoint path carries a *different* run key, but only *warns* if it carries *none* (legacy/pretrained checkpoints). A checkpoint named without a `bsz.._seed..` key passes with a warning. See [Detection → the provenance guard](./Detection.md#the-provenance-guard).
+-- **`mahalanobis-solve` is redundant in practice.** Being bit-identical to `mahalanobis` on these features (see [Integrity of the numerical variants](#integrity-of-the-numerical-variants)), it is kept only as a runnable, verifiable metric (`verify_maha_solve.py`) so the equivalence can be checked rather than assumed.
+-- **`sweep.sh` deliberately omits `set -e`.** This is required for the portable job-throttling (`wait -n` degrades silently on older bash). A failure inside the sweep's own logic will not abort it the way it would in `datamonitor.sh`; per-run failures are surfaced through the `logs/<key>.status` files and the final verdict instead.
+-- **The extract stage rewrites paths via a symlink.** `get_features.py` writes features to a `numpy_files/` sibling of `DATA_DIR`, and the driver symlinks that to `NUMPY_FILES_DIR`. If a real (non-symlink) directory already exists at the sibling path, the driver warns and features may land elsewhere. See [Architecture → Stage 3](./Architecture.md#stage-3-extract).
+-
+-For configuration mismatches between the script defaults and the shipped `.env` (Python version, `DM_SEED`, `BOOTSTRAP_N`, and others), see [Installation → known configuration inconsistencies](./Installation.md#known-configuration-inconsistencies).
+diff --git a/Documentation/Results.md b/Documentation/Results.md
+new file mode 100644
+index 0000000..ef17fbc
+--- /dev/null
++++ b/Documentation/Results.md
+@@ -0,0 +1,32 @@
++# Results
++
++
++## Reproducing the master table
++
++The master table is built by `merge_results.py` from the per-run `results.csv` files that `ood_detection.py` writes.
++
++```bash
++python merge_results.py            # rebuild the master CSV + print the table
++python merge_results.py --quiet    # rebuild the CSV only, no rendering
++```
++
++It globs every `results/*/results.csv`, concatenates, sorts by `[Batch Size, Seed, Metric, Method]`, and writes the master CSV atomically (PID-unique temp file, then `os.replace`), so it is safe to run while evaluations are in flight (last finisher wins; the path comes from `cfg.json`'s `table_path`, default `results/ood_bootstrap.csv`). It then renders the table grouped one section per `(batch size, seed)`, best mean accuracy per section highlighted. Each cell is `mean [LCL, UCL]`, where the bounds are `mean ± 1 std` of the bootstrap, not 95% intervals. The per-run files are the source of truth; the master is a derived view, rebuildable at any time.
++
++---
++
++## Reproducing the seed × batch-size figure
++
++`plot_seed_batch.py` renders the analysis figure (paper Figure 2) from the master CSV: one panel per method, mean detection accuracy versus batch size, with a ±1σ band across the random seeds.
++
++```bash
++python plot_seed_batch.py                                  # defaults
++python plot_seed_batch.py --csv results/ood_bootstrap.csv --out seed_batch_analysis.png
++python plot_seed_batch.py --metric "Mean Sensitivity"      # any Mean* column
++python plot_seed_batch.py --print-summary                  # also dump per-cell stats
++```
++
++Two modelling choices follow from the design: `mahalanobis-solve` is dropped (identical to `mahalanobis`), and `mahalanobis-pinv` is kept and drawn dashed (it differs only in the covariance estimator, so it shows the estimator's effect on accuracy).
++
++
++
++Trains each extractor across four batch sizes `{16, 32, 128, 256}` and ten seeds `1001–1010`, yielding 40 run keys. Each key is evaluated under all four metrics for all three methods (12 rows per key, 480 rows, a complete grid).
+diff --git a/README.md b/README.md
+index 84f952c..e9ae6cd 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ **A pipeline for out-of-distribution (OOD) detection and data-drift monitoring on medical imaging, using statistical process control (SPC).**
+ 
+-DataMonitor trains feature extractors on an in-distribution medical-image view, scores new images by their similarity or distance to that reference, and flags anomalies with SPC control charts. It then simulates a gradual distribution shift and detects the change point with a CUSUM chart. The repository runs one end-to-end experiment, reproducing the paper's master results table ("Table 3") and its drift figure ("Figure 3") across a grid of random seeds and batch sizes.
++DataMonitor trains feature extractors on an in-distribution medical-image view, scores new images by their similarity or distance to that reference, and flags anomalies with SPC control charts. It then simulates a gradual distribution shift and detects the change point with a CUSUM chart. The repository runs one end-to-end experiment, reproducing the paper's master results table ("Table 3"), its seed × batch-size figure ("Figure 2"), and its drift figure ("Figure 3").
+ 
+ ---
+ 
+@@ -24,23 +24,23 @@ The experiment crosses three feature extractors with four scoring metrics on the
+ ## Quick start
+ 
+ ```bash
+-# 1. Configure the run. Edit .env (copy of the documented template).
+-#    Key settings: VENV_DIR, DATA_DIR, BATCH_SIZE, DM_SEED, EPOCHS.
++# 1. Configure the run by editing .env (key settings: VENV_DIR, DATA_DIR,
++#    BATCH_SIZE, DM_SEED, EPOCHS).
+ 
+-# 2. Run the full pipeline from scratch (creates the venv, trains, extracts, evaluates).
++# 2. Run the full pipeline from scratch (venv, train, extract, evaluate):
+ ./datamonitor.sh
+ 
+ # 3. Already have checkpoints? Skip training:
+ RUN_TRAIN=0 ./datamonitor.sh
+ 
+-# 4. Iterating on a metric only? Re-run just evaluation against cached features:
++# 4. Iterating on a metric? Re-run only evaluation against cached features:
+ RUN_SETUP=0 RUN_TRAIN=0 RUN_EXTRACT=0 ./datamonitor.sh
+ 
+ # 5. Sweep many runs in parallel, then merge into the master table:
+ ./sweep.sh 2001:128 2002:128 2001:256 2002:256
+ ```
+ 
+-Each stage is gated by a `RUN_<STAGE>=1/0` toggle, so you can re-enter the pipeline at any point. See the [Architecture](./Documentation/Architecture.md) guide for the orchestration details.
++Each stage is gated by a `RUN_<STAGE>=1/0` toggle, so the pipeline can be re-entered at any point. See [Architecture](./Documentation/Architecture.md) for the orchestration details.
+ 
+ ---
+ 
+@@ -51,41 +51,21 @@ DataMonitor/
+ ├── datamonitor.sh              # orchestrator: the four-stage pipeline
+ ├── sweep.sh                    # parallel multi-run driver (wraps datamonitor.sh)
+ ├── .env                        # machine configuration (documented template)
+-├── requirements.lock.txt       # frozen dependency versions (committed)
+-├── requirements.txt            # original (upstream) pinned versions, for reference
+-├── cfg.json                    # GENERATED by setup: {data_dir, table_path}
++├── requirements.lock.txt       # frozen dependency versions (installed from)
++├── requirements.txt            # original upstream pins, for reference only
+ │
+-├── train.py                    # Stage 2 entrypoint: train one extractor
+-├── get_features.py             # Stage 3 entrypoint: cache feature matrices
+-├── ood_detection.py            # Stage 4a entrypoint: score + bootstrap one (method, metric)
+-├── merge_results.py            # Stage 4 master-table builder + terminal renderer
++├── train.py                    # stage 2: train one extractor
++├── get_features.py             # stage 3: cache feature matrices
++├── ood_detection.py            # stage 4a: score + bootstrap one (method, metric)
++├── merge_results.py            # stage 4: master-table builder + terminal renderer
+ ├── plot_seed_batch.py          # seed × batch-size analysis figure
+-├── verify_maha_solve.py        # standalone numerical-correctness harness
+ ├── utils.py                    # run_name / make_run_dir / set_seed
+ │
+-├── datasets/
+-│   ├── __init__.py             # load_data, matrixify, two-crop wiring
+-│   └── medmnist_abdominalCT.py # the AbdominalCT dataset class
+-│
+-├── feature_methods/
+-│   ├── __init__.py             # package shim: re-exports load_model / load_eval
+-│   ├── supcon_loss.py          # shim re-export of SupConLoss + TwoCropTransform
+-│   └── src/
+-│       ├── __init__.py         # load_model / load_eval registry (bridge layer)
+-│       ├── base.py             # shim: re-exports Model / FeatureSpace
+-│       ├── models/base.py      # Model / FeatureSpace abstract base classes
+-│       ├── conv_autoencoder.py # shim: adds _key() to the upstream autoencoder
+-│       ├── Unsuper_conv_autoencoder.py  # the convolutional autoencoder
+-│       ├── ood_supervised_cnn.py        # the BCE ResNet-18 extractor
+-│       ├── ood_supervised_ctr.py        # the supervised-contrastive extractor
+-│       └── supcon_loss.py      # canonical SupConLoss + TwoCropTransform
+-│
+-├── SPC_Charts/
+-│   ├── data_shift_simulation.py # simulate_data_shift (drift generator)
+-│   └── CUSUM_detector.py        # CUSUMChangeDetector (change-point detector)
+-│
+-└── figs/
+-    └── DataMonitor.png          # conceptual overview figure
++├── datasets/                   # load_data, matrixify; the AbdominalCT dataset class
++├── feature_methods/            # the three extractors + a small bridge/registry layer
++│   └── src/                    #   (see Detection.md for the layout)
++├── SPC_Charts/                 # simulate_data_shift + CUSUMChangeDetector (upstream)
++└── figs/DataMonitor.png        # conceptual overview figure
+ ```
+ 
+ Generated at run time (git-ignored): `data/`, `model_saves/`, `numpy_files/`, `results/`, `figures/`, `logs/`, the virtual environment, and `cfg.json`.
+@@ -96,11 +76,11 @@ Generated at run time (git-ignored): `data/`, `model_saves/`, `numpy_files/`, `r
+ 
+ | Guide | Contents |
+ | --- | --- |
+-| [Installation](./Documentation/Installation.md) | Prerequisites, the virtual environment, the lockfile, `.env` configuration, and known config inconsistencies. |
+-| [Architecture](./Documentation/Architecture.md) | The run-key convention, the four-stage data flow and artifact tree, `datamonitor.sh`/`sweep.sh` internals, and a file-by-file index. |
++| [Installation](./Documentation/Installation.md) | Prerequisites, the virtual environment, the lockfile, `.env` configuration, and the known config inconsistencies. |
++| [Architecture](./Documentation/Architecture.md) | The run-key convention, the four-stage data flow and artifact tree, and the `datamonitor.sh`/`sweep.sh` internals. |
+ | [Feature Extraction & Detection](./Documentation/Detection.md) | The three feature extractors and the OOD scoring core: the Mahalanobis numerical variants, SPC rules, and the bootstrap. |
+ | [Data-Drift Monitoring](./Documentation/Data-Drift-Monitoring.md) | The SPC charts, the CUSUM detector, and the drift simulation. |
+-| [Results & Limitations](./Documentation/Results-and-Limitations.md) | Reproducing Table 3 and Figure 2, how to read the numbers, and the study and code caveats. |
++| [Results](./Documentation/Results.md) | Reproducing results. |
+ 
+ ---
+ 
+@@ -118,8 +98,4 @@ If you use **DataMonitor** in your work, please cite:
+ 
+ ## Repository
+ 
+-The source code is maintained by DIDSR:
+-
+-- **GitHub:** [github.com/DIDSR/DataMonitor](https://github.com/DIDSR/DataMonitor)
+-
+-Use the issue tracker to report bugs, request features, or ask questions.
++The source code is maintained by DIDSR: [github.com/DIDSR/DataMonitor](https://github.com/DIDSR/DataMonitor). Use the issue tracker to report bugs, request features, or ask questions.
