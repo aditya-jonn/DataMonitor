@@ -80,15 +80,13 @@ set +a
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `REPO_DIR` | script directory | Where the repo lives. |
-| `VENV_DIR` | `$REPO_DIR/.venv-py38`* | Virtual-environment path. |
-| `PYTHON_BIN` | `python3.8`* | Interpreter used to create the venv. |
+| `VENV_DIR` | `$REPO_DIR/.venv-py311`* | Virtual-environment path. |
+| `PYTHON_BIN` | `python3`* | Interpreter used to create the venv. |
 | `DATA_DIR` | `data` | MedMNIST `.npz` location. |
 | `MODEL_SAVES_DIR` | `model_saves` | Trained `.pt` checkpoints. |
 | `RESULTS_DIR` | `results` | Bootstrap CSV + per-run results. |
 | `NUMPY_FILES_DIR` | `numpy_files` | Cached feature `.npz`. |
 | `FIGURES_DIR` | `figures` | Control charts + drift figure. |
-
-\* See the **Version note** below. The shipped `.env` overrides these script defaults with the Python-3.11 values (`VENV_DIR=./venv-py311`, `PYTHON_BIN=python3`).
 
 ### Training hyperparameters
 
@@ -103,7 +101,7 @@ set +a
 | `DM_NUM_WORKERS` | `0` / `6`* | DataLoader workers per training pipeline. |
 | `OMP_NUM_THREADS` | (unset) / `4`* | Cap each pipeline's BLAS threads (matters under `sweep.sh`). |
 
-\* The script's internal default differs from the shipped `.env` value; see the version note.
+\* The script's internal default differs from the shipped `.env` value; see Known configuration inconsistencies below.
 
 ### Evaluation and hardware
 
@@ -114,7 +112,7 @@ set +a
 | `EVAL_METRICS` | `cosine mahalanobis mahalanobis-solve mahalanobis-pinv` | Space-separated metrics to evaluate in stage 4a. |
 | `AUTOENCODER_CKPT`, `CNN_CKPT`, `CTR_CKPT` | auto-discovered | Explicit checkpoint paths (otherwise the newest matching `.pt` is used). |
 
-\* See the version note.
+\* See Known configuration inconsistencies below.
 
 ---
 
@@ -129,24 +127,12 @@ This reconciles two statements that look contradictory. The driver's header says
 
 ---
 
-## Version note: Python 3.8 vs 3.11
-
-An intentional split in the codebase can confuse a first read:
-
-- The **header comment** of `datamonitor.sh` and the script's *internal* defaults (`VENV_DIR=$REPO_DIR/.venv-py38`, `PYTHON_BIN=python3.8`) describe the *original* paper environment (Python 3.8, `torch 1.10`).
-- The **active configuration**, the committed `.env` and `requirements.lock.txt`, targets the *modernised* environment (Python 3.11, `torch 2.6`). `.env` sets `VENV_DIR=./venv-py311` and `PYTHON_BIN=python3` as hard assignments, and the setup version check expects 3.11.
-
-The shipped `.env` wins, so a clean checkout builds a **Python 3.11** environment. Treat the 3.8 strings as historical. If you remove or rewrite `.env`, fall back to the lockfile's expectation (3.11), not the script's stale default. Several other defaults also differ between the script and `.env`; see the next section.
-
----
-
 ## Known configuration inconsistencies
 
 Several defaults differ between `datamonitor.sh`'s internal fallbacks and the committed `.env`. As above, the shipped `.env` value is what a clean checkout uses; the script's default applies only if that `.env` line is removed.
 
 | Setting | `datamonitor.sh` default | Shipped `.env` value | Effective on clean checkout |
 | --- | --- | --- | --- |
-| Python / venv | `python3.8` / `.venv-py38` | `python3` / `./venv-py311` (hard) | **Python 3.11** |
 | `DM_SEED` | `1001` | `${DM_SEED:-2008}` (soft) | **2008** (unless caller exports `DM_SEED`) |
 | `BOOTSTRAP_N` | `100` | `${BOOTSTRAP_N:-1000}` (soft) | **1000** (unless overridden) |
 | `USE_GPUS` | empty (= all GPUs) | `${USE_GPUS:-0}` (soft) | **GPU 0** (unless overridden) |

@@ -3,7 +3,7 @@
 # datamonitor.sh — staged author-reproduction driver for the DataMonitor paper
 #
 # Runs the ORIGINAL upstream pipeline (train.py / get_features.py /
-# ood_detection.py), inside a Python 3.8 venv that matches the paper's
+# ood_detection.py), inside a Python 3.11 venv that matches the paper's
 # requirements.txt. Each stage is gated by a RUN_<STAGE>=1/0 env var so you
 # can re-enter the pipeline at any step.
 #
@@ -35,10 +35,10 @@
 # Other env vars (all have sensible defaults; override on the command line)
 # ------------------------------------------------------------------------
 #   REPO_DIR              path to the DataMonitor repo (default: script dir)
-#   VENV_DIR              path to the venv (default: $REPO_DIR/.venv-py38)
-#   PYTHON_BIN            python interpreter (default: python3.8)
+#   VENV_DIR              path to the venv (default: $REPO_DIR/.venv-py311)
+#   PYTHON_BIN            python interpreter (default: python3.11)
 #   VIRTUALENV_PYZ        optional path to virtualenv.pyz (fallback for hosts
-#                         where `python3.8 -m venv` is broken)
+#                         where `python3 -m venv` is broken)
 #   DATA_DIR              MedMNIST .npz location (default: $REPO_DIR/data)
 #   MODEL_SAVES_DIR       trained checkpoints  (default: $REPO_DIR/model_saves)
 #   RESULTS_DIR           CSV + plot output    (default: $REPO_DIR/results)
@@ -60,8 +60,8 @@
 #   - It does NOT use the rewritten datamonitor_lib/pipeline.py. This is
 #     deliberate — to reproduce paper Table 3 / Figure 3 we run the upstream
 #     code with the paper's ResNet-18 architectures and paper's checkpoints.
-#   - It does NOT try to use Python > 3.8. The upstream requirements.txt pins
-#     numpy 1.19 / torch 1.10 which have no wheels for newer Python.
+#   - It does NOT try to use Python > 3.11. The upstream requirements.txt pins
+#     numpy 2.x / torch 2.6 which have no wheels for newer Python.
 # =============================================================================
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -94,8 +94,8 @@ RUN_EXTRACT="${RUN_EXTRACT:-1}"
 RUN_EVAL="${RUN_EVAL:-1}"
 
 # REPO_DIR was set above; allow .env to have overridden it.
-VENV_DIR="${VENV_DIR:-$REPO_DIR/.venv-py38}"
-PYTHON_BIN="${PYTHON_BIN:-python3.8}"
+VENV_DIR="${VENV_DIR:-$REPO_DIR/.venv-py311}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 # VIRTUALENV_PYZ is optional — only used if present
 
 DATA_DIR="${DATA_DIR:-$REPO_DIR/data}"
